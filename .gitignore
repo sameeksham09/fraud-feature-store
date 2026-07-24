@@ -44,3 +44,4 @@ logs/
 # ── Env files ─────────────────────────────────────────
 .env
 .env.local
+spark/jars/
