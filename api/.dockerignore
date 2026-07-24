@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+.pytest_cache
+.venv
+venv
+env
+
+# IDE
+.idea
+.vscode
+
+# Data - keep mlruns for model
+# mlruns
+*.parquet
+*.csv
+dump.rdb
+*.rdb
+
+# Docs
+README.md
+CLAUDE.md
+*.md
+
+# Docker
+docker-compose.yml
+Dockerfile*
+.dockerignore
+
+# Spark
+spark
+feast
+producer
+
+# CI
+.github

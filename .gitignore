@@ -1,0 +1,46 @@
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Virtual envs ──────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── ML / data artifacts ───────────────────────────────
+mlruns/
+data/
+*.parquet
+*.csv
+*.pkl
+*.joblib
+dump.rdb
+*.rdb
+
+# ── Spark ─────────────────────────────────────────────
+/tmp/checkpoints/
+metastore_db/
+derby.log
+spark-warehouse/
+spark/work/
+
+# ── IDE / OS ──────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────
+*.log
+logs/
+
+# ── Env files ─────────────────────────────────────────
+.env
+.env.local

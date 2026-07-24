@@ -1,0 +1,37 @@
+# Core ML / API
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.2
+
+# ML
+mlflow==2.20.0
+xgboost==2.1.1
+scikit-learn==1.5.2
+
+# Data
+pandas>=2.2.0
+numpy==1.26.4
+
+# Visualization
+matplotlib==3.9.2
+
+# Config
+pyyaml==6.0.2
+python-dotenv==1.0.1
+
+# Feature store
+feast==0.40.0
+s3fs>=2024.10.0
+
+# Redis
+redis==5.2.0
+
+# Monitoring
+prometheus-client==0.21.0
+
+# Kafka (producer)
+kafka-python==2.0.2
+faker==24.0.0
+
+# Spark (run separately, not installed here)
+# pyspark==3.5.1

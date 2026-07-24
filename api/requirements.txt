@@ -1,0 +1,23 @@
+# FastAPI and server
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.2
+
+# ML
+mlflow==2.20.0
+xgboost==2.1.1
+scikit-learn==1.5.2
+
+# Data
+pandas>=2.2.0
+numpy==1.26.4
+
+# Config
+pyyaml==6.0.2
+python-dotenv==1.0.1
+
+# Redis
+redis==5.2.0
+
+# Monitoring
+prometheus-client==0.21.0

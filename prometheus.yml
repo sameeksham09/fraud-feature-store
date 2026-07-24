@@ -1,0 +1,21 @@
+# Prometheus configuration for fraud detection API
+# Tells Prometheus where to find metrics to scrape
+
+global:
+  scrape_interval: 15s  # How often to scrape
+  evaluation_interval: 15s  # How often to evaluate rules
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Fraud Detection API - scrape metrics from our FastAPI app
+  # The API runs on port 8000 and has /metrics endpoint
+  - job_name: 'fraud-api'
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+    # Give the API time to start up before scraping
+    scrape_interval: 30s
+    metrics_path: '/metrics'

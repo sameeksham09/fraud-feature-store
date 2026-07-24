@@ -1,0 +1,122 @@
+name: CI
+
+# ============================================================
+# WHAT THIS DOES:
+# - Runs automatically on every push to main and every PR
+# - Checks code syntax (lint)
+# - Runs all tests
+# ============================================================
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# ============================================================
+# JOB 1: LINT - Check code syntax without running it
+# ============================================================
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: Lint
+
+    steps:
+      # Step 1: Download the code from GitHub
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      # Step 3: Check syntax of all Python files
+      # py_compile just checks for syntax errors - doesn't run the code
+      - name: Check Python syntax
+        run: |
+          echo "=== Checking Producer ==="
+          python -m py_compile producer/transaction_generator.py
+          python -m py_compile producer/produce_transactions.py
+
+          echo "=== Checking Spark ==="
+          python -m py_compile spark/feature_engineering.py
+          python -m py_compile spark/redis_writer.py
+          python -m py_compile spark/validation.py
+
+          echo "=== Checking API ==="
+          python -m py_compile api/main.py
+          python -m py_compile api/auth.py
+          python -m py_compile api/rate_limit.py
+          python -m py_compile api/metrics.py
+
+          echo "=== Checking Models ==="
+          python -m py_compile models/train.py
+
+          echo "=== Checking Shared Modules ==="
+          python -m py_compile features/__init__.py
+
+          echo "✅ All syntax checks passed!"
+
+# ============================================================
+# JOB 2: TEST - Run all unit tests
+# ============================================================
+  test:
+    runs-on: ubuntu-latest
+    name: Test
+
+    # Don't run tests if lint fails
+    needs: lint
+
+    steps:
+      # Step 1: Download the code from GitHub
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      # Step 3: Cache pip packages (makes builds faster)
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      # Step 4: Install all dependencies
+      # We need to install ALL requirements, not just producer/spark
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest httpx pyyaml redis
+          pip install -r producer/requirements.txt
+          pip install -r spark/requirements.txt
+
+          # Install API dependencies (missing from original!)
+          # FastAPI, mlflow, xgboost, etc.
+          pip install fastapi uvicorn mlflow xgboost scikit-learn pandas numpy matplotlib pydantic
+
+      # Step 5: Set required environment variables
+      # API needs this to run tests
+      - name: Set environment variables
+        run: |
+          echo "API_KEYS=test-key-for-ci" >> $GITHUB_ENV
+
+      # Step 6: Run all tests
+      - name: Run tests
+        run: |
+          pytest tests/ -v --tb=short
+
+      # Step 7: Upload test results (so you can see them in GitHub)
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: .pytest_cache
