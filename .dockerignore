@@ -32,6 +32,8 @@ pip-delete-this-directory.txt
 mlruns/
 *.log
 dump.rdb
+spark/jars/
+spark/checkpoints/
 
 # --- Testing ---
 .pytest_cache/

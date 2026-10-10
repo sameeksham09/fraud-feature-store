@@ -11,11 +11,11 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  # Fraud Detection API - scrape metrics from our FastAPI app
-  # The API runs on port 8000 and has /metrics endpoint
+  # Fraud Detection API - scrape metrics from FastAPI /metrics
+  # host.docker.internal: for local `make api` (uvicorn on host)
+  # api:8000: for dockerized api service inside compose network
   - job_name: 'fraud-api'
     static_configs:
-      - targets: ['host.docker.internal:8000']
-    # Give the API time to start up before scraping
+      - targets: ['host.docker.internal:8000', 'api:8000']
     scrape_interval: 30s
     metrics_path: '/metrics'

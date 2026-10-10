@@ -108,6 +108,63 @@ services:
       "
     restart: "no"
 
+  # ── App Services (Dockerized) ────────────────────────────────────────────
+
+  spark:
+    build:
+      context: .
+      dockerfile: spark/Dockerfile
+    container_name: fraud-spark
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - spark_checkpoints:/tmp/checkpoints
+    restart: unless-stopped
+    # Spark Structured Streaming — 4 queries:
+    #   query0 Bronze raw → s3://features/bronze/raw_transactions/ (30s)
+    #   query1 Gold windows → Redis user_features:* (30s)
+    #   query2 Gold flags  → Redis txn_flags:* (10s)
+    #   query3 Silver windows → s3://features/windowed_features/ Parquet (30s)
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: fraud-api
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # Local default — override via .env or secrets. Prod compose requires a real value.
+      # See .env.example and docker-compose.prod.yml.
+      API_KEYS: ${API_KEYS:-dev-api-key-change-in-prod}
+    volumes:
+      # Mount host mlruns so `make train` on the host is visible inside the API
+      - ./mlruns:/app/mlruns:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   # ── Monitoring Stack ─────────────────────────────────────────────────────
 
   prometheus:
@@ -142,3 +199,4 @@ volumes:
   minio_data:
   prometheus_data:
   grafana_data:
+  spark_checkpoints:

@@ -3,8 +3,7 @@ name: CI
 # ============================================================
 # WHAT THIS DOES:
 # - Runs automatically on every push to main and every PR
-# - Checks code syntax (lint)
-# - Runs all tests
+# - Checks code syntax (lint), runs tests, scans for security
 # ============================================================
 
 on:
@@ -13,6 +12,10 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+  security-events: write  # for Trivy SARIF upload
+
 # ============================================================
 # JOB 1: LINT - Check code syntax without running it
 # ============================================================
@@ -20,20 +23,15 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     name: Lint
-
     steps:
-      # Step 1: Download the code from GitHub
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2: Set up Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
-      # Step 3: Check syntax of all Python files
-      # py_compile just checks for syntax errors - doesn't run the code
       - name: Check Python syntax
         run: |
           echo "=== Checking Producer ==="
@@ -44,12 +42,14 @@ jobs:
           python -m py_compile spark/feature_engineering.py
           python -m py_compile spark/redis_writer.py
           python -m py_compile spark/validation.py
+          python -m py_compile spark/quarantine.py
 
           echo "=== Checking API ==="
           python -m py_compile api/main.py
           python -m py_compile api/auth.py
           python -m py_compile api/rate_limit.py
           python -m py_compile api/metrics.py
+          python -m py_compile api/explain.py
 
           echo "=== Checking Models ==="
           python -m py_compile models/train.py
@@ -57,7 +57,20 @@ jobs:
           echo "=== Checking Shared Modules ==="
           python -m py_compile features/__init__.py
 
+          echo "=== Checking Load harness ==="
+          python -m py_compile load/locustfile.py
+
           echo "✅ All syntax checks passed!"
+
+      - name: Artifact leak guard (git ls-files must not contain mlruns/dump.rdb/venv)
+        run: |
+          echo "=== Checking for leaked artifacts in git index ==="
+          if git ls-files | grep -Eq '(^|/)(mlruns/|dump\.rdb|venv/|\.venv/|\.env$|__pycache__/)'; then
+            echo "❌ Leaked artifacts found in git index:"
+            git ls-files | grep -E '(mlruns/|dump\.rdb|venv/|\.venv/|\.env$|__pycache__/)' || true
+            exit 1
+          fi
+          echo "✅ No leaked artifacts"
 
 # ============================================================
 # JOB 2: TEST - Run all unit tests
@@ -65,22 +78,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     name: Test
-
-    # Don't run tests if lint fails
     needs: lint
-
     steps:
-      # Step 1: Download the code from GitHub
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Step 2: Set up Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
-      # Step 3: Cache pip packages (makes builds faster)
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
@@ -89,34 +96,79 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      # Step 4: Install all dependencies
-      # We need to install ALL requirements, not just producer/spark
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pytest httpx pyyaml redis
           pip install -r producer/requirements.txt
           pip install -r spark/requirements.txt
-
-          # Install API dependencies (missing from original!)
-          # FastAPI, mlflow, xgboost, etc.
           pip install fastapi uvicorn mlflow xgboost scikit-learn pandas numpy matplotlib pydantic
 
-      # Step 5: Set required environment variables
-      # API needs this to run tests
       - name: Set environment variables
         run: |
           echo "API_KEYS=test-key-for-ci" >> $GITHUB_ENV
 
-      # Step 6: Run all tests
       - name: Run tests
         run: |
           pytest tests/ -v --tb=short
 
-      # Step 7: Upload test results (so you can see them in GitHub)
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: test-results
           path: .pytest_cache
+
+# ============================================================
+# JOB 3: SECURITY - Trivy, Bandit, pip-audit (non-blocking on first pass)
+# ============================================================
+  security:
+    runs-on: ubuntu-latest
+    name: Security
+    needs: lint
+    # Don't block the pipeline on first pass — surface findings without failing PRs
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Install audit tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit pip-audit
+
+      - name: Bandit (Python SAST)
+        continue-on-error: true
+        run: |
+          echo "=== Bandit ==="
+          bandit -r api spark features -x tests --severity-level low || true
+
+      - name: pip-audit (known CVEs in deps)
+        continue-on-error: true
+        run: |
+          echo "=== pip-audit ==="
+          pip-audit --desc || true
+
+      - name: Trivy filesystem scan (CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@0.24.0
+        continue-on-error: true
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '0'
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        continue-on-error: true
+        with:
+          sarif_file: 'trivy-results.sarif'

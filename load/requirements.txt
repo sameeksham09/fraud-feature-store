@@ -1,0 +1,2 @@
+# Load-testing deps — isolated from main requirements.txt
+locust>=2.20

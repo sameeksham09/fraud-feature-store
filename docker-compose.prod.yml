@@ -1,0 +1,47 @@
+# Production override for fraud-feature-store.
+# Usage:
+#   API_KEYS=<secret> docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#   # or: make up-prod   (requires API_KEYS env var)
+#
+# This file is MERGED on top of docker-compose.yml — it only overrides what
+# needs to differ in prod: replication factor, required secrets, resource hints.
+
+services:
+  kafka:
+    environment:
+      # Single-broker local dev uses 1; prod needs 3 for durability (requires 3 brokers).
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      # Uncomment when running a 3-broker cluster:
+      # KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+
+  api:
+    environment:
+      # Fail fast if API_KEYS is not set — no dev default in prod.
+      API_KEYS: ${API_KEYS:?API_KEYS is required in prod — set it in .env or secrets}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    # Tighten healthcheck in prod (faster detection)
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    # Example resource limits — adjust to your host
+    # deploy:
+    #   resources:
+    #     limits: { cpus: "1", memory: 1G }
+    #     reservations: { cpus: "0.5", memory: 512M }
+
+  prometheus:
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+
+  grafana:
+    environment:
+      # Override via secrets in real prod (e.g. Docker secrets / env_file)
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}

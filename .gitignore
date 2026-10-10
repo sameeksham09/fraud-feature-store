@@ -1,21 +1,39 @@
-# ── Python ─────────────────────────────────────────────
+# ── Python ───────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
 *.egg-info/
+dist/
+build/
+*.egg
 .pytest_cache/
+.coverage
+htmlcov/
+.tox/
 .mypy_cache/
 .ruff_cache/
 
-# ── Virtual envs ──────────────────────────────────────
+# ── Virtual environments ────────────────────────────────────────────────
 venv/
 .venv/
 env/
+ENV/
+.env
+.venv*/
+.env.local
+.env.*.local
 
-# ── ML / data artifacts ───────────────────────────────
+# ── Secrets ─────────────────────────────────────────────────────────────
+*.pem
+*.key
+credentials.json
+!.env.example
+
+# ── ML / data artifacts ─────────────────────────────────────────────────
 mlruns/
+mlartifacts/
 data/
 *.parquet
 *.csv
@@ -23,25 +41,44 @@ data/
 *.joblib
 dump.rdb
 *.rdb
+models/artifacts/*.png
+!models/artifacts/.gitkeep
 
-# ── Spark ─────────────────────────────────────────────
+# ── Spark ───────────────────────────────────────────────────────────────
 /tmp/checkpoints/
+checkpoints/
 metastore_db/
 derby.log
 spark-warehouse/
 spark/work/
+spark/jars/
 
-# ── IDE / OS ──────────────────────────────────────────
-.idea/
-.vscode/
+# ── Feast ───────────────────────────────────────────────────────────────
+feast/registry.db
+feast/.feast/
+feast/data/
+feast/feature_store.yaml.lock
+
+# ── MinIO / local data ──────────────────────────────────────────────────
+.parquet/
+*.db
+*.sqlite
+*.sqlite3
+
+# ── OS / IDE ────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.jupyter/
+.ipynb_checkpoints/
 
-# ── Logs ──────────────────────────────────────────────
+# ── Logs ────────────────────────────────────────────────────────────────
 *.log
 logs/
 
-# ── Env files ─────────────────────────────────────────
-.env
-.env.local
-spark/jars/
+# ── Claude Code local settings ──────────────────────────────────────────
+.claude/settings.local.json
