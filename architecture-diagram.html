@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fraud Feature Store — Architecture Diagram</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+  :root {
+    --bg: #0a0e1a;
+    --card: #111827;
+    --card2: #1a2236;
+    --border: #1e2d4a;
+    --border2: #2a3d5c;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --dim: #64748b;
+    --blue: #3b82f6;
+    --cyan: #06b6d4;
+    --purple: #8b5cf6;
+    --amber: #f59e0b;
+    --emerald: #10b981;
+    --rose: #f43f5e;
+    --pink: #ec4899;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; overflow-x: hidden; }
+  /* Header */
+  .header { text-align: center; padding: 36px 20px 18px; background: radial-gradient(ellipse 80% 60% at 50% -10%, rgba(59,130,246,0.18), transparent 70%), var(--bg); border-bottom: 1px solid var(--border); }
+  .header h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; background: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .header p { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .header .badge { display:inline-block; margin-top:10px; font-size:11px; font-weight:600; letter-spacing:0.06em; text-transform:uppercase; color:#60a5fa; background: rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.25); padding:4px 12px; border-radius:99px; }
+  /* Legend */
+  .legend { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; padding:14px 20px; background: #0f172a; border-bottom: 1px solid var(--border); }
+  .legend-item { display:flex; align-items:center; gap:6px; font-size:11px; font-weight:600; color: var(--muted); }
+  .legend-dot { width:10px; height:10px; border-radius:50%; }
+  /* Layout */
+  .container { max-width: 1180px; margin: 0 auto; padding: 22px 18px 40px; }
+  /* Main flow */
+  .flow-wrap { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 20px; margin-bottom: 18px; overflow-x: auto; }
+  .flow-title { font-size:12px; font-weight:700; letter-spacing:0.08em; text-transform:uppercase; color: var(--dim); margin-bottom:14px; display:flex; align-items:center; gap:8px; }
+  .flow-title span.line { flex:1; height:1px; background: var(--border); }
+  /* Grid flow */
+  .flow { display:grid; grid-template-columns: 1fr 30px 1fr 30px 1.1fr 30px 1fr 30px 1fr; align-items:start; gap:0; min-width: 980px; }
+  .col { display:flex; flex-direction:column; gap:10px; }
+  .node { background: var(--card2); border:1px solid var(--border); border-radius:12px; padding:12px 12px 10px; position:relative; transition: transform .15s, border-color .15s, box-shadow .15s; cursor:default; }
+  .node:hover { transform: translateY(-2px); border-color: var(--border2); box-shadow: 0 8px 24px rgba(0,0,0,0.35); }
+  .node .icon { width:34px; height:34px; border-radius:9px; display:flex; align-items:center; justify-content:center; font-size:16px; margin-bottom:8px; }
+  .node .label { font-size:11px; font-weight:700; letter-spacing:0.05em; text-transform:uppercase; color: var(--muted); }
+  .node .title { font-size:13px; font-weight:700; margin-top:2px; line-height:1.25; }
+  .node .desc { font-size:11px; color: var(--muted); margin-top:4px; line-height:1.45; }
+  .node .meta { display:flex; flex-wrap:wrap; gap:4px; margin-top:8px; }
+  .meta-pill { font-family:'JetBrains Mono',monospace; font-size:10px; font-weight:500; padding:2px 6px; border-radius:6px; border:1px solid var(--border); background: rgba(255,255,255,0.04); color: var(--muted); }
+  .meta-pill.accent { color:#fff; border-color: transparent; }
+  /* Arrow column */
+  .arrow-col { display:flex; flex-direction:column; align-items:center; justify-content:center; padding-top:44px; gap:6px; }
+  .arrow-col .arrow { width:100%; height:2px; background: var(--border2); position:relative; }
+  .arrow-col .arrow::after { content:'▶'; position:absolute; right:-6px; top:50%; transform: translateY(-52%); font-size:9px; color: var(--border2); }
+  .arrow-col .arrow-label { font-family:'JetBrains Mono',monospace; font-size:9px; font-weight:600; color: var(--dim); text-align:center; line-height:1.2; white-space:nowrap; }
+  /* Spark center big */
+  .spark-node { background: linear-gradient(135deg, rgba(59,130,246,0.18), rgba(139,92,246,0.18)); border:1px solid rgba(59,130,246,0.35); }
+  .spark-node .icon { background: linear-gradient(135deg, #3b82f6, #8b5cf6); color:#fff; }
+  /* Store nodes */
+  .store-grid { display:grid; grid-template-columns: 1fr; gap:8px; }
+  .store-card { background: var(--card2); border:1px solid var(--border); border-radius:10px; padding:10px 11px; }
+  .store-card .s-head { display:flex; align-items:center; gap:8px; }
+  .store-card .s-icon { width:28px; height:28px; border-radius:7px; display:flex; align-items:center; justify-content:center; font-size:13px; flex-shrink:0; }
+  .store-card .s-name { font-size:12px; font-weight:700; }
+  .store-card .s-sub { font-size:10px; color: var(--muted); font-family:'JetBrains Mono',monospace; }
+  .store-card .s-desc { font-size:11px; color: var(--muted); margin-top:6px; line-height:1.45; }
+  .store-card .s-meta { margin-top:6px; display:flex; flex-wrap:wrap; gap:4px; }
+  .store-card:hover { border-color: var(--border2); }
+  /* Branch lines */
+  .branch-wrap { position:relative; }
+  .branch-line { position:absolute; left:50%; top:-10px; width:2px; height:10px; background: var(--border2); }
+  /* Medallion table */
+  .medallion { display:grid; grid-template-columns: repeat(3, 1fr); gap:12px; margin-top:2px; }
+  .med-card { background: var(--card2); border:1px solid var(--border); border-radius:12px; padding:14px; text-align:center; }
+  .med-card .med-icon { width:44px; height:44px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:20px; margin:0 auto 8px; }
+  .med-card h4 { font-size:13px; font-weight:800; }
+  .med-card .med-sub { font-family:'JetBrains Mono',monospace; font-size:10px; color: var(--muted); margin-top:2px; }
+  .med-card p { font-size:11px; color: var(--muted); margin-top:6px; line-height:1.5; }
+  .med-card .med-pill { display:inline-block; margin-top:8px; font-size:10px; font-weight:600; padding:3px 8px; border-radius:99px; letter-spacing:0.04em; }
+  /* Sequence */
+  .seq { position:relative; padding-left:22px; }
+  .seq::before { content:''; position:absolute; left:8px; top:6px; bottom:6px; width:2px; background: var(--border); border-radius:99px; }
+  .seq-step { position:relative; display:grid; grid-template-columns: 26px 1fr; gap:10px; padding:8px 0 8px; border-bottom: 1px dashed rgba(255,255,255,0.06); }
+  .seq-step:last-child { border-bottom:none; }
+  .seq-dot { width:26px; height:26px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:800; color:#fff; flex-shrink:0; margin-top:1px; }
+  .seq-body h4 { font-size:12px; font-weight:700; }
+  .seq-body p { font-size:11px; color: var(--muted); margin-top:2px; line-height:1.5; }
+  .seq-body code { font-family:'JetBrains Mono',monospace; font-size:10.5px; background: rgba(255,255,255,0.06); border:1px solid var(--border); padding:1px 5px; border-radius:5px; color:#cbd5e1; }
+  /* Two col */
+  .two-col { display:grid; grid-template-columns: 1fr 1fr; gap:14px; }
+  /* Callout */
+  .callout { background: linear-gradient(135deg, rgba(245,158,11,0.10), rgba(239,68,68,0.08)); border:1px solid rgba(245,158,11,0.25); border-radius:10px; padding:12px 14px; display:flex; gap:10px; align-items:flex-start; }
+  .callout .ci { width:28px; height:28px; border-radius:7px; background: rgba(245,158,11,0.18); display:flex; align-items:center; justify-content:center; font-size:14px; flex-shrink:0; }
+  .callout h4 { font-size:12px; font-weight:700; color:#fbbf24; }
+  .callout p { font-size:11px; color: var(--muted); margin-top:2px; line-height:1.5; }
+  /* Feature table */
+  .feat-table { width:100%; border-collapse:collapse; font-size:11px; }
+  .feat-table th { text-align:left; font-size:10px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color: var(--dim); padding:8px 10px; border-bottom:1px solid var(--border); }
+  .feat-table td { padding:7px 10px; border-bottom:1px solid rgba(255,255,255,0.05); color: var(--muted); }
+  .feat-table td:first-child { color: var(--text); font-weight:600; font-family:'JetBrains Mono',monospace; font-size:11px; }
+  .feat-table tr:hover td { background: rgba(255,255,255,0.02); }
+  /* Tooltip */
+  .tip { position:absolute; bottom:calc(100% + 8px); left:50%; transform: translateX(-50%); background:#0f172a; border:1px solid var(--border2); color: var(--muted); font-size:11px; line-height:1.5; padding:8px 10px; border-radius:8px; width:220px; box-shadow: 0 12px 32px rgba(0,0,0,0.45); opacity:0; pointer-events:none; transition: opacity .15s; z-index:10; }
+  .node:hover .tip, .store-card:hover .tip { opacity:1; }
+  /* Responsive */
+  @media (max-width: 900px) {
+    .flow { grid-template-columns: 1fr; min-width: unset; }
+    .arrow-col { flex-direction:row; padding:0; }
+    .arrow-col .arrow { height:2px; width:40px; }
+    .arrow-col .arrow::after { content:'▼'; right:50%; top:6px; transform: translateX(50%); }
+    .two-col { grid-template-columns:1fr; }
+    .medallion { grid-template-columns:1fr; }
+  }
+  /* Print */
+  @media print { body { background:#fff; color:#111; } .flow-wrap,.med-card,.store-card,.node { break-inside: avoid; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Real-Time Fraud Detection — Feature Store</h1>
+  <p>Producer → Kafka → Spark Streaming → Redis (Gold) / MinIO (Bronze & Silver) → Feast → XGBoost + MLflow → FastAPI + SHAP</p>
+  <div class="badge">Medallion Architecture &nbsp;·&nbsp; Hybrid ELT + ETL &nbsp;·&nbsp; p95 &lt; 15 ms</div>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span> Streaming Path (live)</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#10b981"></span> Offline / Training Path</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span> Storage Layer</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#8b5cf6"></span> ML / Serving</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#64748b; border:1px solid #475569"></span> Optional / Not on live path</div>
+</div>
+
+<div class="container">
+
+  <!-- ========== MAIN ARCHITECTURE FLOW ========== -->
+  <div class="flow-wrap">
+    <div class="flow-title">Full Architecture — Data flows left → right <span class="line"></span> <span style="font-size:10px; font-weight:500; color:#64748b; text-transform:none; letter-spacing:0;">hover cards for details</span></div>
+    <div class="flow">
+
+      <!-- COL 1: Producer -->
+      <div class="col">
+        <div class="node" style="border-color: rgba(6,182,214,0.35);">
+          <div class="icon" style="background: linear-gradient(135deg,#06b6d4,#3b82f6); color:#fff;">◈</div>
+          <div class="label" style="color:#22d3ee;">Ingestion</div>
+          <div class="title">Producer</div>
+          <div class="desc">Fake customers swiping cards.<br>200 users · 2 tx/sec · ~3% fraud</div>
+          <div class="meta">
+            <span class="meta-pill">producer/produce_transactions.py</span>
+            <span class="meta-pill accent" style="background:#06b6d4;">2 tx/sec</span>
+          </div>
+          <div class="tip">Generates JSON: {user_id, amount, merchant_category, merchant_country, timestamp, transaction_id}. The <code>is_fraud</code> field is only for demo — in prod labels come from chargebacks 30–90 days later.</div>
+        </div>
+        <div class="store-card" style="border-color: rgba(6,182,214,0.2);">
+          <div class="s-head"><div class="s-icon" style="background: rgba(6,182,214,0.18);">📦</div><div><div class="s-name">Raw JSON</div><div class="s-sub">one message per swipe</div></div></div>
+          <div class="s-desc">Example: <code style="font-family:'JetBrains Mono',monospace; font-size:10px;">{"user_id":"user_0001","amount":2500,"merchant_country":"NG"}</code></div>
+        </div>
+      </div>
+
+      <div class="arrow-col"><div class="arrow"></div><div class="arrow-label">Kafka<br>raw_transactions</div></div>
+
+      <!-- COL 2: Kafka -->
+      <div class="col">
+        <div class="node" style="border-color: rgba(59,130,246,0.35);">
+          <div class="icon" style="background: linear-gradient(135deg,#3b82f6,#6366f1); color:#fff;">≋</div>
+          <div class="label" style="color:#60a5fa;">Queue</div>
+          <div class="title">Apache Kafka</div>
+          <div class="desc">Durable log — never loses a transaction. Topic: <b>raw_transactions</b></div>
+          <div class="meta">
+            <span class="meta-pill">localhost:9092 (host)</span>
+            <span class="meta-pill">kafka:29092 (docker)</span>
+          </div>
+          <div class="tip">Dual listeners: producer & Spark use localhost:9092; containers use kafka:29092. kafka-ui at :8080 to watch live messages.</div>
+        </div>
+        <div class="callout" style="padding:8px 10px;">
+          <div class="ci">💡</div>
+          <div><h4 style="font-size:11px;">Think: conveyor belt</h4><p>Producer drops letters in. Spark picks them up instantly. If Spark is down, letters wait safely.</p></div>
+        </div>
+      </div>
+
+      <div class="arrow-col"><div class="arrow"></div><div class="arrow-label">Structured<br>Streaming</div></div>
+
+      <!-- COL 3: Spark -->
+      <div class="col">
+        <div class="node spark-node">
+          <div class="icon">⚡</div>
+          <div class="label" style="color:#93c5fd;">Processing — The Factory</div>
+          <div class="title">Spark Structured Streaming</div>
+          <div class="desc">Watches Kafka 24/7. Parses JSON → computes windowed aggregates + flag features.</div>
+          <div class="meta">
+            <span class="meta-pill">5-min tumbling / 1-min slide</span>
+            <span class="meta-pill">watermark 10 min</span>
+            <span class="meta-pill accent" style="background: linear-gradient(135deg,#3b82f6,#8b5cf6);">4 queries</span>
+          </div>
+          <div class="tip">spark/feature_engineering.py. Window agg: count/sum/avg/max over last 5 min per user. Flags: is_foreign, is_high_amount, is_suspicious. Uses shared features.py for consistent logic.</div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:6px;">
+          <div class="store-card" style="padding:8px 9px;">
+            <div style="font-size:10px; font-weight:700; letter-spacing:0.05em; color:#60a5fa; text-transform:uppercase;">Windowed Agg</div>
+            <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--muted); margin-top:4px; line-height:1.6;">
+              txn_count_5min<br>total_amount_5min<br>avg_amount_5min<br>max_amount_5min
+            </div>
+          </div>
+          <div class="store-card" style="padding:8px 9px;">
+            <div style="font-size:10px; font-weight:700; letter-spacing:0.05em; color:#a78bfa; text-transform:uppercase;">Flag Features</div>
+            <div style="font-family:'JetBrains Mono',monospace; font-size:10px; color:var(--muted); margin-top:4px; line-height:1.6;">
+              is_foreign<br>is_high_amount (>2000)<br>is_suspicious<br>(country+amount)
+            </div>
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns: repeat(4,1fr); gap:4px; text-align:center;">
+          <div style="background:rgba(59,130,246,0.12); border:1px solid rgba(59,130,246,0.25); border-radius:7px; padding:5px 2px;"><div style="font-size:9px; font-weight:700; color:#60a5fa;">Q0</div><div style="font-size:9px; color:var(--muted);">Bronze</div><div style="font-size:8px; color:var(--dim);">30s</div></div>
+          <div style="background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.25); border-radius:7px; padding:5px 2px;"><div style="font-size:9px; font-weight:700; color:#34d399;">Q1</div><div style="font-size:9px; color:var(--muted);">Redis W</div><div style="font-size:8px; color:var(--dim);">30s</div></div>
+          <div style="background:rgba(16,185,129,0.12); border:1px solid rgba(16,185,129,0.25); border-radius:7px; padding:5px 2px;"><div style="font-size:9px; font-weight:700; color:#34d399;">Q2</div><div style="font-size:9px; color:var(--muted);">Redis F</div><div style="font-size:8px; color:var(--dim);">10s</div></div>
+          <div style="background:rgba(245,158,11,0.12); border:1px solid rgba(245,158,11,0.25); border-radius:7px; padding:5px 2px;"><div style="font-size:9px; font-weight:700; color:#fbbf24;">Q3</div><div style="font-size:9px; color:var(--muted);">Silver</div><div style="font-size:8px; color:var(--dim);">30s</div></div>
+        </div>
+      </div>
+
+      <div class="arrow-col">
+        <div style="display:flex; flex-direction:column; gap:10px; align-items:center;">
+          <div style="display:flex; align-items:center; gap:4px;"><div class="arrow" style="width:22px;"></div><div style="font-size:8px; font-weight:700; color:#f59e0b;">BRONZE</div></div>
+          <div style="display:flex; align-items:center; gap:4px;"><div class="arrow" style="width:22px; background:#10b981;"></div><div style="font-size:8px; font-weight:700; color:#34d399;">GOLD</div></div>
+          <div style="display:flex; align-items:center; gap:4px;"><div class="arrow" style="width:22px; background:#f59e0b;"></div><div style="font-size:8px; font-weight:700; color:#fbbf24;">SILVER</div></div>
+        </div>
+      </div>
+
+      <!-- COL 4: Stores -->
+      <div class="col">
+        <div class="store-grid">
+          <div class="store-card" style="border-color: rgba(245,158,11,0.30); background: linear-gradient(135deg, rgba(245,158,11,0.08), transparent);">
+            <div class="s-head"><div class="s-icon" style="background: rgba(245,158,11,0.20); color:#fbbf24;">🥉</div><div><div class="s-name">Bronze — Raw Replay Log</div><div class="s-sub">MinIO · s3a://features/bronze/raw_transactions/ · JSON</div></div></div>
+            <div class="s-desc">Immutable landing of every raw Kafka message. For <b>audit & replay</b> — you can rebuild Silver/Gold without re-consuming Kafka.</div>
+            <div class="s-meta"><span class="meta-pill">ELT</span><span class="meta-pill">query0 · append</span></div>
+          </div>
+          <div class="store-card" style="border-color: rgba(16,185,129,0.30); background: linear-gradient(135deg, rgba(16,185,129,0.08), transparent);">
+            <div class="s-head"><div class="s-icon" style="background: rgba(16,185,129,0.18); color:#34d399;">🥇</div><div><div class="s-name">Gold — Online Store (Redis)</div><div class="s-sub">Redis · user_features:{user_id} · txn_flags:{txn_id}</div></div></div>
+            <div class="s-desc">Latest per-user 5-min aggregates. <b>&lt;10 ms</b> lookup. TTL 24h (users) / 1h (flags).</div>
+            <div class="s-meta"><span class="meta-pill">ETL</span><span class="meta-pill">query1+2 · update/append</span><span class="meta-pill accent" style="background:#10b981;">LIVE PATH</span></div>
+          </div>
+          <div class="store-card" style="border-color: rgba(245,158,11,0.30); background: linear-gradient(135deg, rgba(245,158,11,0.07), transparent);">
+            <div class="s-head"><div class="s-icon" style="background: rgba(245,158,11,0.16); color:#fbbf24;">🥈</div><div><div class="s-name">Silver — Offline Store (Parquet)</div><div class="s-sub">MinIO · s3a://features/windowed_features/ · Parquet</div></div></div>
+            <div class="s-desc">Clean windowed aggregates. Feast reads this. Partitioned by window.</div>
+            <div class="s-meta"><span class="meta-pill">ETL</span><span class="meta-pill">query3 · Parquet</span><span class="meta-pill accent" style="background:#f59e0b; color:#111;">FEAST SRC</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-col">
+        <div style="display:flex; flex-direction:column; gap:18px; align-items:center;">
+          <div style="display:flex; align-items:center; gap:4px; opacity:0.55;"><div class="arrow" style="width:22px; background: var(--dim);"></div><div style="font-size:8px; font-weight:700; color:var(--dim);">FEAST<br>OFFLINE</div></div>
+          <div style="display:flex; align-items:center; gap:4px;"><div class="arrow" style="width:22px; background:#10b981;"></div><div style="font-size:8px; font-weight:700; color:#34d399;">REDIS<br>DIRECT</div></div>
+        </div>
+      </div>
+
+      <!-- COL 5: Feast + Model + API -->
+      <div class="col">
+        <div class="store-card" style="border-style:dashed; opacity:0.9;">
+          <div class="s-head"><div class="s-icon" style="background: rgba(100,116,139,0.18);">📚</div><div><div class="s-name">Feast <span style="font-size:10px; font-weight:600; color:var(--dim);">— Feature Store</span></div><div class="s-sub">feast/features.py · registry.db · NOT on live path</div></div></div>
+          <div class="s-desc"><b>Librarian:</b> one definition for <code>txn_count_5min</code> etc. Offline: <code>get_historical_features()</code> for training (point-in-time correct). Online lookup is <b>skipped</b> — API reads Redis directly for speed.</div>
+          <div class="s-meta"><span class="meta-pill">feast apply</span><span class="meta-pill">FileSource s3://features/windowed_features/</span><span class="meta-pill" style="border-style:dashed;">optional</span></div>
+        </div>
+        <div class="node" style="border-color: rgba(139,92,246,0.35); background: linear-gradient(135deg, rgba(139,92,246,0.12), rgba(236,72,153,0.08));">
+          <div class="icon" style="background: linear-gradient(135deg,#8b5cf6,#ec4899); color:#fff;">◆</div>
+          <div class="label" style="color:#c4b5fd;">Model</div>
+          <div class="title">XGBoost + MLflow</div>
+          <div class="desc">100 trees · depth 4 · learns fraud rule.<br>Tracked in MLflow (fraud_detection).</div>
+          <div class="meta"><span class="meta-pill">models/train.py</span><span class="meta-pill">--historical w/ Feast</span><span class="meta-pill accent" style="background:#8b5cf6;">mlruns/</span></div>
+          <div class="tip">Synthetic 10k rows. Rule: (is_suspicious & max&gt;500) OR (count&gt;10 & foreign). Saves to mlruns/{run_id}/artifacts/model + feature_importance.png</div>
+        </div>
+        <div class="node" style="border-color: rgba(16,185,129,0.35); background: linear-gradient(135deg, rgba(16,185,129,0.10), rgba(6,182,214,0.08));">
+          <div class="icon" style="background: linear-gradient(135deg,#10b981,#06b6d4); color:#fff;">▸</div>
+          <div class="label" style="color:#34d399;">Serving — The Bodyguard</div>
+          <div class="title">FastAPI + SHAP</div>
+          <div class="desc">Reads Redis Gold → XGBoost → fraud probability. <b>p95 &lt;15 ms</b>.</div>
+          <div class="meta"><span class="meta-pill">POST /score</span><span class="meta-pill">POST /explain</span><span class="meta-pill">GET /health</span><span class="meta-pill accent" style="background:#10b981;">:8000</span></div>
+          <div class="tip">api/main.py loads latest mlruns model on startup. Reads HGETALL user_features:{user_id}. Uses shap.TreeExplainer if installed, else importance_fallback. Risk: &gt;0.7 HIGH, &gt;0.4 MEDIUM, else LOW.</div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:14px; flex-wrap:wrap;">
+      <span style="font-size:10px; color:var(--dim);">Infrastructure (docker compose):</span>
+      <span class="meta-pill">Kafka :9092</span><span class="meta-pill">Redis :6379</span><span class="meta-pill">MinIO :9000 / :9001</span><span class="meta-pill">kafka-ui :8080</span><span class="meta-pill">Prometheus :9090</span><span class="meta-pill">Grafana :3000</span><span class="meta-pill">MLflow :5000</span>
+    </div>
+  </div>
+
+  <!-- ========== MEDALLION ========== -->
+  <div class="flow-wrap">
+    <div class="flow-title">Medallion Layers — Why 3 copies? <span class="line"></span></div>
+    <div class="medallion">
+      <div class="med-card" style="border-color: rgba(205,127,50,0.35);">
+        <div class="med-icon" style="background: linear-gradient(135deg, #92400e, #b45309); color:#fff;">🥉</div>
+        <h4>Bronze — Land Raw First</h4>
+        <div class="med-sub">s3://features/bronze/ · JSON · append</div>
+        <p>Every raw Kafka message dumped unchanged. Like a <b>security camera tape</b>. If your transform logic was wrong, you don't lose data — you just replay the tape.</p>
+        <span class="med-pill" style="background: rgba(180,83,9,0.18); color:#fbbf24; border:1px solid rgba(180,83,9,0.35);">ELT &nbsp;·&nbsp; IMMUTABLE &nbsp;·&nbsp; AUDIT</span>
+      </div>
+      <div class="med-card" style="border-color: rgba(245,158,11,0.35);">
+        <div class="med-icon" style="background: linear-gradient(135deg, #d97706, #f59e0b); color:#fff;">🥈</div>
+        <h4>Silver — Clean & Curated</h4>
+        <div class="med-sub">s3://features/windowed_features/ · Parquet · append</div>
+        <p>Windowed aggregates computed by Spark. Columnar, compressed. <b>Feast reads this</b> for historical training. This is what the model learns from.</p>
+        <span class="med-pill" style="background: rgba(245,158,11,0.15); color:#fbbf24; border:1px solid rgba(245,158,11,0.30);">ETL &nbsp;·&nbsp; PARQUET &nbsp;·&nbsp; FEAST OFFLINE</span>
+      </div>
+      <div class="med-card" style="border-color: rgba(16,185,129,0.35);">
+        <div class="med-icon" style="background: linear-gradient(135deg, #059669, #10b981); color:#fff;">🥇</div>
+        <h4>Gold — Ready to Serve</h4>
+        <div class="med-sub">Redis · Hash · user_features:* · 24h TTL</div>
+        <p>Latest value per user, in memory. <b>API reads this directly</b> (no Feast) for &lt;10 ms lookups. Always fresh — written every 30s.</p>
+        <span class="med-pill" style="background: rgba(16,185,129,0.15); color:#34d399; border:1px solid rgba(16,185,129,0.30);">ETL &nbsp;·&nbsp; REDIS &nbsp;·&nbsp; LIVE SERVING</span>
+      </div>
+    </div>
+    <div class="callout" style="margin-top:12px;">
+      <div class="ci">🎯</div>
+      <div><h4>Hybrid ELT + ETL</h4><p>Bronze is ELT (Extract-Load-then-Transform: land raw first, transform later). Silver + Gold are ETL (Extract-Transform-then-Load). Interview line: <em>"Feast is intentionally not on the live path to avoid materialization lag."</em></p></div>
+    </div>
+  </div>
+
+  <!-- ========== FOLLOW ONE TRANSACTION ========== -->
+  <div class="two-col">
+    <div class="flow-wrap" style="margin-bottom:0;">
+      <div class="flow-title">Follow One Transaction — user_0001 buys $2,500 laptop in NG <span class="line"></span></div>
+      <div class="seq">
+        <div class="seq-step">
+          <div class="seq-dot" style="background:#06b6d4;">1</div>
+          <div class="seq-body"><h4>Producer emits JSON onto Kafka</h4><p><code>{"transaction_id":"txn_abc123","user_id":"user_0001","amount":2500,"merchant_category":"electronics","merchant_country":"NG","timestamp":"2026-09-05T14:05:00"}</code></p></div>
+        </div>
+        <div class="seq-step">
+          <div class="seq-dot" style="background:#3b82f6;">2</div>
+          <div class="seq-body"><h4>Spark reads & parses the stream</h4><p>Parses bytes → typed columns → adds <code>event_time</code>. Watermark 10 min handles late arrivals.</p></div>
+        </div>
+        <div class="seq-step">
+          <div class="seq-dot" style="background:#f59e0b;">3</div>
+          <div class="seq-body"><h4>Spark computes windowed aggregates (last 5 min for user_0001)</h4><p>Group by 5-min tumbling window + user. e.g. <code>txn_count_5min=7, total=8200, avg=1171, max=2500</code>. Also computes flags: <code>is_foreign=1, is_high_amount=1, is_suspicious=1</code>.</p></div>
+        </div>
+        <div class="seq-step">
+          <div class="seq-dot" style="background:#8b5cf6;">4</div>
+          <div class="seq-body"><h4>Dual writes in parallel (4 queries)</h4><p><code>Q0</code> raw JSON → Bronze (S3). <code>Q1</code> windowed aggregates → Redis <code>user_features:user_0001</code> (HSET, TTL 24h). <code>Q2</code> flags → Redis <code>txn_flags:txn_abc123</code>. <code>Q3</code> aggregates → Silver Parquet.</p></div>
+        </div>
+        <div class="seq-step">
+          <div class="seq-dot" style="background:#10b981;">5</div>
+          <div class="seq-body"><h4>FastAPI serves a prediction</h4><p>Client: <code>POST /score {"user_id":"user_0001","amount":2500,"merchant_category":"electronics","merchant_country":"NG"}</code><br>API: <code>HGETALL user_features:user_0001</code> → builds feature vector in <code>FEATURE_ORDER</code> → <code>model.predict_proba()</code> → returns:</p><p style="margin-top:6px;"><code style="display:block; background:#0f172a; padding:8px; border-radius:7px; line-height:1.6;">{<br>&nbsp;&nbsp;"fraud_probability": 0.92,<br>&nbsp;&nbsp;"risk_level": "HIGH",<br>&nbsp;&nbsp;"features_used": [2500, 7, 8200, 1171, 2500, 1, 1, 1],<br>&nbsp;&nbsp;"latency_ms": 8.4<br>}</code></p></div>
+        </div>
+        <div class="seq-step">
+          <div class="seq-dot" style="background:#ec4899;">6</div>
+          <div class="seq-body"><h4>Explainability (opt-in)</h4><p><code>POST /score?explain=true</code> or <code>POST /explain</code> adds: <code>explainability: {shap_values, top_contributors[3], reasons[], method: "shap" | "importance_fallback"}</code>. e.g. <em>"High amount ($2500) · 7 transactions in 5 min · Suspicious country NG"</em></p></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:14px;">
+      <div class="flow-wrap" style="margin-bottom:0;">
+        <div class="flow-title">Feature Contract — Order is the contract <span class="line"></span></div>
+        <table class="feat-table">
+          <thead><tr><th>#</th><th>Feature</th><th>Type</th><th>Source</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>amount</td><td>current tx</td><td>request body</td></tr>
+            <tr><td>2</td><td>txn_count_5min</td><td>windowed</td><td>Redis Gold</td></tr>
+            <tr><td>3</td><td>total_amount_5min</td><td>windowed</td><td>Redis Gold</td></tr>
+            <tr><td>4</td><td>avg_amount_5min</td><td>windowed</td><td>Redis Gold</td></tr>
+            <tr><td>5</td><td>max_amount_5min</td><td>windowed</td><td>Redis Gold</td></tr>
+            <tr><td>6</td><td>is_foreign</td><td>flag</td><td>Redis Gold</td></tr>
+            <tr><td>7</td><td>is_high_amount</td><td>flag</td><td>Redis Gold</td></tr>
+            <tr><td>8</td><td>is_suspicious</td><td>flag</td><td>Redis Gold</td></tr>
+          </tbody>
+        </table>
+        <p style="font-size:10px; color:var(--dim); margin-top:8px; line-height:1.5;">This order (<code>FEATURE_ORDER</code> in <code>api/main.py</code> & <code>models/train.py</code>) must match exactly. Feast schema + training columns + serving vector — all three must align or predictions are silently wrong.</p>
+        <div class="callout" style="margin-top:10px; background: rgba(239,68,68,0.07); border-color: rgba(239,68,68,0.22);">
+          <div class="ci" style="background: rgba(239,68,68,0.15);">⚠️</div>
+          <div><h4 style="color:#f87171;">Common gotcha</h4><p>Adding a new feature? Update <b>all three</b>: <code>features.py</code> (shared logic) → <code>feast/features.py</code> (schema) → <code>models/train.py</code> (retrain) → <code>api/main.py</code> (<code>FEATURE_ORDER</code>). Then retrain or the model will read columns shifted.</p></div>
+        </div>
+      </div>
+
+      <div class="flow-wrap" style="margin-bottom:0;">
+        <div class="flow-title">Latency Budget — Why p95 &lt; 15 ms <span class="line"></span></div>
+        <div style="display:flex; flex-direction:column; gap:6px;">
+          <div style="display:flex; align-items:center; gap:8px; background: var(--card2); border:1px solid var(--border); border-radius:8px; padding:8px 10px;">
+            <span style="width:28px; height:28px; border-radius:6px; background: rgba(16,185,129,0.15); display:flex; align-items:center; justify-content:center; font-size:12px;">⚡</span>
+            <div style="flex:1;"><div style="font-size:11px; font-weight:700;">Redis HGETALL</div><div style="font-size:10px; color:var(--muted);">user_features:{user_id}</div></div>
+            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; color:#34d399; background: rgba(16,185,129,0.12); padding:3px 7px; border-radius:6px;">~2–5 ms</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; background: var(--card2); border:1px solid var(--border); border-radius:8px; padding:8px 10px;">
+            <span style="width:28px; height:28px; border-radius:6px; background: rgba(139,92,246,0.15); display:flex; align-items:center; justify-content:center; font-size:12px;">◆</span>
+            <div style="flex:1;"><div style="font-size:11px; font-weight:700;">XGBoost predict_proba</div><div style="font-size:10px; color:var(--muted);">100 trees · depth 4</div></div>
+            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; color:#a78bfa; background: rgba(139,92,246,0.12); padding:3px 7px; border-radius:6px;">~1–3 ms</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px; background: var(--card2); border:1px solid var(--border); border-radius:8px; padding:8px 10px;">
+            <span style="width:28px; height:28px; border-radius:6px; background: rgba(236,72,153,0.15); display:flex; align-items:center; justify-content:center; font-size:12px;">◐</span>
+            <div style="flex:1;"><div style="font-size:11px; font-weight:700;">SHAP (if explain=true)</div><div style="font-size:10px; color:var(--muted);">TreeExplainer · 8 features</div></div>
+            <span style="font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; color:#f472b6; background: rgba(236,72,153,0.10); padding:3px 7px; border-radius:6px;">~3–6 ms</span>
+          </div>
+          <div style="display:flex; align-items:center; justify-content:space-between; background: linear-gradient(135deg, rgba(16,185,129,0.12), rgba(6,182,214,0.10)); border:1px solid rgba(16,185,129,0.25); border-radius:8px; padding:9px 12px; margin-top:2px;">
+            <span style="font-size:11px; font-weight:700;">Total (without SHAP)</span><span style="font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:800; color:#34d399;">&lt; 10 ms typical</span>
+          </div>
+        </div>
+        <p style="font-size:10px; color:var(--dim); margin-top:8px;">Direct Redis read is why we skip Feast online — Feast adds 2–4 ms serialization + materialization lag (minutes stale).</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== TRAINING VS SERVING ========== -->
+  <div class="flow-wrap">
+    <div class="flow-title">Two Paths — Training (offline) vs Serving (online) <span class="line"></span></div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:12px;">
+      <div style="background: linear-gradient(135deg, rgba(59,130,246,0.08), rgba(139,92,246,0.06)); border:1px solid rgba(59,130,246,0.22); border-radius:12px; padding:14px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span style="width:30px; height:30px; border-radius:8px; background: linear-gradient(135deg,#3b82f6,#8b5cf6); display:flex; align-items:center; justify-content:center; font-size:14px; color:#fff;">🎓</span>
+          <div><div style="font-size:12px; font-weight:800;">Training Path (Offline)</div><div style="font-size:10px; color:var(--muted);">Runs once — or after schema changes</div></div>
+          <span style="margin-left:auto; font-size:10px; font-weight:700; color:#60a5fa; background: rgba(59,130,246,0.15); padding:3px 8px; border-radius:99px;">BATCH</span>
+        </div>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:11px; background:#0f172a; border:1px solid var(--border); border-radius:8px; padding:10px; line-height:1.7; color:#cbd5e1;">
+          Spark Silver Parquet<br>
+          &nbsp;&nbsp;↓ <span style="color:#60a5fa;">s3://features/windowed_features/</span><br>
+          Feast.get_historical_features() <span style="color:#64748b;">(point-in-time join)</span><br>
+          &nbsp;&nbsp;↓ entity_df + labels<br>
+          models/train.py <span style="color:#a78bfa;">XGBoost fit</span><br>
+          &nbsp;&nbsp;↓ mlflow.xgboost.log_model<br>
+          mlruns/{run_id}/artifacts/model/
+        </div>
+        <p style="font-size:11px; color:var(--muted); margin-top:8px;">Use <code>python models/train.py --historical</code> to pull real Silver data via Feast. Otherwise synthetic 10k rows are generated — the model just memorizes the synthetic fraud rule.</p>
+      </div>
+      <div style="background: linear-gradient(135deg, rgba(16,185,129,0.08), rgba(6,182,214,0.06)); border:1px solid rgba(16,185,129,0.22); border-radius:12px; padding:14px;">
+        <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
+          <span style="width:30px; height:30px; border-radius:8px; background: linear-gradient(135deg,#10b981,#06b6d4); display:flex; align-items:center; justify-content:center; font-size:14px; color:#fff;">⚡</span>
+          <div><div style="font-size:12px; font-weight:800;">Serving Path (Online)</div><div style="font-size:10px; color:var(--muted);">Every request — &lt;15 ms</div></div>
+          <span style="margin-left:auto; font-size:10px; font-weight:700; color:#34d399; background: rgba(16,185,129,0.15); padding:3px 8px; border-radius:99px;">REAL-TIME</span>
+        </div>
+        <div style="font-family:'JetBrains Mono',monospace; font-size:11px; background:#0f172a; border:1px solid var(--border); border-radius:8px; padding:10px; line-height:1.7; color:#cbd5e1;">
+          Client POST /score <span style="color:#34d399;">{user_id, amount, ...}</span><br>
+          &nbsp;&nbsp;↓ <span style="color:#10b981;">HGETALL user_features:{user_id}</span> (Redis Gold)<br>
+          build vector in FEATURE_ORDER<br>
+          &nbsp;&nbsp;↓ <span style="color:#a78bfa;">model.predict_proba()</span><br>
+          &nbsp;→ {fraud_probability, risk_level} <span style="color:#64748b;">+ SHAP if ?explain=true</span>
+        </div>
+        <p style="font-size:11px; color:var(--muted); margin-top:8px;"><b>Why no Feast here?</b> Direct Redis is 2–4 ms faster and fresher (30s vs minutes). Feast would add serialization + materialization lag.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========== HOW TO RUN ========== -->
+  <div class="flow-wrap">
+    <div class="flow-title">How to Run — 3 terminals <span class="line"></span></div>
+    <div style="display:grid; grid-template-columns: repeat(3, 1fr); gap:10px;">
+      <div style="background:#0f172a; border:1px solid var(--border); border-radius:10px; padding:12px;">
+        <div style="font-size:11px; font-weight:700; color:#22d3ee; letter-spacing:0.04em;">TERMINAL A — Produce</div>
+        <code style="display:block; margin-top:6px; font-family:'JetBrains Mono',monospace; font-size:11px; background: rgba(255,255,255,0.04); border:1px solid var(--border); padding:8px; border-radius:7px; color:#e2e8f0;">make produce<br><span style="color:#64748b;"># python producer/produce_transactions.py</span></code>
+        <div style="font-size:11px; color:var(--muted); margin-top:6px;">Watch live at <b>kafka-ui :8080</b></div>
+      </div>
+      <div style="background:#0f172a; border:1px solid var(--border); border-radius:10px; padding:12px;">
+        <div style="font-size:11px; font-weight:700; color:#60a5fa; letter-spacing:0.04em;">TERMINAL B — Spark</div>
+        <code style="display:block; margin-top:6px; font-family:'JetBrains Mono',monospace; font-size:11px; background: rgba(255,255,255,0.04); border:1px solid var(--border); padding:8px; border-radius:7px; color:#e2e8f0;">make spark<br><span style="color:#64748b;"># python spark/feature_engineering.py</span></code>
+        <div style="font-size:11px; color:var(--muted); margin-top:6px;">4 queries start — check <b>redis-cli HGETALL user_features:user_0001</b></div>
+      </div>
+      <div style="background:#0f172a; border:1px solid var(--border); border-radius:10px; padding:12px;">
+        <div style="font-size:11px; font-weight:700; color:#34d399; letter-spacing:0.04em;">TERMINAL C — Serve</div>
+        <code style="display:block; margin-top:6px; font-family:'JetBrains Mono',monospace; font-size:11px; background: rgba(255,255,255,0.04); border:1px solid var(--border); padding:8px; border-radius:7px; color:#e2e8f0;">make train && make api<br><span style="color:#64748b;"># uvicorn api.main:app --port 8000</span></code>
+        <div style="font-size:11px; color:var(--muted); margin-top:6px;">Then <b>curl POST /score</b> — see latency_ms</div>
+      </div>
+    </div>
+    <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+      <code style="font-family:'JetBrains Mono',monospace; font-size:11px; background:#0f172a; border:1px solid var(--border); padding:6px 10px; border-radius:7px; color:#94a3b8;">make up <span style="color:#64748b;"># docker compose up -d</span></code>
+      <code style="font-family:'JetBrains Mono',monospace; font-size:11px; background:#0f172a; border:1px solid var(--border); padding:6px 10px; border-radius:7px; color:#94a3b8;">make health <span style="color:#64748b;"># curl /health + /score smoke test</span></code>
+      <code style="font-family:'JetBrains Mono',monospace; font-size:11px; background:#0f172a; border:1px solid var(--border); padding:6px 10px; border-radius:7px; color:#94a3b8;">make test <span style="color:#64748b;"># pytest (72 tests)</span></code>
+      <code style="font-family:'JetBrains Mono',monospace; font-size:11px; background:#0f172a; border:1px solid var(--border); padding:6px 10px; border-radius:7px; color:#94a3b8;">make down</code>
+    </div>
+  </div>
+
+  <div style="text-align:center; padding: 10px 0 6px; color:var(--dim); font-size:11px;">
+    Fraud Feature Store · Medallion Bronze → Silver → Gold · Feast offline · Redis online · XGBoost + SHAP · FastAPI :8000
+  </div>
+
+</div>
+
+</body>
+</html>
