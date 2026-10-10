@@ -10,6 +10,8 @@ Sink order:
   2. Fall back to structured log + local file under /tmp/quarantine/
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
