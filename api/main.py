@@ -29,7 +29,7 @@ import yaml
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, Depends, Response
+from fastapi import FastAPI, HTTPException, Request, Depends, Response, Query
 from pydantic import BaseModel, validator
 from fastapi.security import APIKeyHeader
 from fastapi.security.api_key import APIKey
@@ -60,6 +60,16 @@ from features import (
     compute_is_high_amount,
     compute_is_suspicious,
 )
+
+# Explainability (SHAP or importance fallback) — optional, never breaks scoring
+try:
+    from api.explain import init_explainer, explain_prediction
+
+    EXPLAIN_AVAILABLE = True
+except ImportError:
+    init_explainer = None  # type: ignore
+    explain_prediction = None  # type: ignore
+    EXPLAIN_AVAILABLE = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +105,12 @@ async def lifespan(app: FastAPI):
         _model = mlflow.xgboost.load_model(model_uri)
         MODEL_LOADED.set(1)  # Set gauge to 1 = loaded
         print(f"✅ Model loaded from: {model_uri}")
+        # Initialize SHAP explainer if available (non-fatal)
+        if EXPLAIN_AVAILABLE and _model is not None:
+            try:
+                init_explainer(_model, FEATURE_ORDER)  # type: ignore
+            except Exception as exc:
+                print(f"ℹ️  Explainability init skipped: {exc}")
     except Exception as exc:
         MODEL_LOADED.set(0)  # Set gauge to 0 = not loaded
         ERRORS_TOTAL.labels(error_type='model_load').inc()
@@ -118,6 +134,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Fraud Detection API", version="1.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "0"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -250,6 +276,15 @@ class ScoreResponse(BaseModel):
     features_used: dict
     redis_features_found: bool
     latency_ms: float
+    explainability: Optional[dict] = None  # SHAP values + human reasons
+
+
+class ExplainResponse(BaseModel):
+    user_id: str
+    fraud_probability: float
+    risk_level: str
+    features_used: dict
+    explainability: dict
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -283,7 +318,13 @@ def metrics():
 
 
 @app.post("/score", response_model=ScoreResponse)
-def score(req: ScoreRequest, request: Request, response: Response, api_key: str = Depends(get_api_key)):
+def score(
+    req: ScoreRequest,
+    request: Request,
+    response: Response,
+    api_key: str = Depends(get_api_key),
+    explain: bool = Query(False, description="Include SHAP values + human reasons"),
+):
     # Check rate limit and include headers in response
     rate_limit_headers = check_rate_limit(request, api_key)
     for header_name, header_value in rate_limit_headers.items():
@@ -367,6 +408,19 @@ def score(req: ScoreRequest, request: Request, response: Response, api_key: str 
     # Track last fraud probability (gauge)
     LAST_FRAUD_PROBABILITY.set(fraud_prob)
 
+    # ── 5. Explainability (opt-in via ?explain=true)
+    explainability = None
+    if explain and EXPLAIN_AVAILABLE and explain_prediction is not None:
+        try:
+            explainability = explain_prediction(
+                _model, features, FEATURE_ORDER, fraud_prob,
+                merchant_country=req.merchant_country,
+                amount=req.amount,
+            )
+        except Exception as exc:
+            # Never break scoring if explainability fails
+            print(f"⚠️  Explainability failed: {exc}")
+
     # Track total request latency
     total_latency = time.time() - t_start
     REQUEST_LATENCY.labels(endpoint='/score').observe(total_latency)
@@ -380,6 +434,77 @@ def score(req: ScoreRequest, request: Request, response: Response, api_key: str 
         features_used=features,
         redis_features_found=redis_features_found,
         latency_ms=round(latency_ms, 2),
+        explainability=explainability,
+    )
+
+
+@app.post("/explain", response_model=ExplainResponse)
+def explain(
+    req: ScoreRequest,
+    request: Request,
+    response: Response,
+    api_key: str = Depends(get_api_key),
+):
+    """
+    Dedicated explainability endpoint — always returns SHAP + reasons.
+    Same payload as /score, but the response is centered on *why*.
+    """
+    API_REQUESTS_TOTAL.labels(endpoint='/explain', method='POST').inc()
+    t_start = time.time()
+
+    if _model is None:
+        ERRORS_TOTAL.labels(error_type='prediction').inc()
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    if not EXPLAIN_AVAILABLE or explain_prediction is None:
+        raise HTTPException(status_code=503, detail="Explainability not available (install shap)")
+
+    # Reuse same feature logic as /score
+    is_foreign = compute_is_foreign(req.merchant_country)
+    is_high_amount = compute_is_high_amount(req.amount)
+    is_suspicious = compute_is_suspicious(req.merchant_country, req.amount)
+
+    redis_features_found = False
+    txn_count_5min = total_amount_5min = avg_amount_5min = max_amount_5min = 0.0
+    try:
+        _ensure_redis_connected()
+        if _redis_client is not None:
+            raw = _redis_client.hgetall(f"user_features:{req.user_id}")
+            if raw:
+                redis_features_found = True
+                txn_count_5min = float(raw.get("txn_count_5min", 0))
+                total_amount_5min = float(raw.get("total_amount_5min", 0))
+                avg_amount_5min = float(raw.get("avg_amount_5min", 0))
+                max_amount_5min = float(raw.get("max_amount_5min", 0))
+    except Exception:
+        pass  # explain works even without Redis
+
+    features = {
+        "txn_count_5min": txn_count_5min,
+        "total_amount_5min": total_amount_5min,
+        "avg_amount_5min": avg_amount_5min,
+        "max_amount_5min": max_amount_5min,
+        "is_foreign": float(is_foreign),
+        "is_high_amount": float(is_high_amount),
+        "is_suspicious": float(is_suspicious),
+    }
+    X = np.array([[features[f] for f in FEATURE_ORDER]], dtype=float)
+    fraud_prob = float(_model.predict_proba(X)[0][1])
+    risk_level = "HIGH" if fraud_prob > 0.7 else ("MEDIUM" if fraud_prob > 0.4 else "LOW")
+
+    explainability = explain_prediction(
+        _model, features, FEATURE_ORDER, fraud_prob,
+        merchant_country=req.merchant_country, amount=req.amount,
+    )
+    explainability["redis_features_found"] = redis_features_found
+
+    REQUEST_LATENCY.labels(endpoint='/explain').observe(time.time() - t_start)
+
+    return ExplainResponse(
+        user_id=req.user_id,
+        fraud_probability=round(fraud_prob, 4),
+        risk_level=risk_level,
+        features_used=features,
+        explainability=explainability,
     )
 
 

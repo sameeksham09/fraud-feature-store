@@ -1,37 +1,36 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
-# Set working directory
-WORKDIR /app
-
-# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
+WORKDIR /app
+
+# ── System deps ─────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
-COPY api/requirements.txt /app/requirements.txt
+# ── Python deps ─────────────────────────────────────────────────────────
+# Use the single root requirements.txt as source of truth.
+# api/requirements.txt is kept for standalone installs but the image uses root.
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# ── App code ────────────────────────────────────────────────────────────
+COPY api ./api
+COPY features ./features
+COPY models ./models
+# mlruns is NOT baked in — mount it at runtime so host training is visible:
+#   volumes: ["./mlruns:/app/mlruns:ro"]
+# If no mlruns exists yet, the API starts in degraded mode (503 on /score) until you `make train`.
 
-# Copy application code
-COPY api/ /app/api/
-COPY models/ /app/models/
-
-# Create necessary directories
-RUN mkdir -p /app/mlruns
-
-# Expose port
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# Env defaults for Docker network (override with compose or -e)
+ENV REDIS_HOST=redis
+ENV REDIS_PORT=6379
 
-# Run the application
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=20s \
+  CMD curl -fsS http://localhost:8000/health || exit 1
+
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

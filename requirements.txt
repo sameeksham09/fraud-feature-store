@@ -29,6 +29,9 @@ redis==5.2.0
 # Monitoring
 prometheus-client==0.21.0
 
+# Explainability (optional — enables SHAP values in /score?explain=true and /explain)
+# shap>=0.44.0
+
 # Kafka (producer)
 kafka-python==2.0.2
 faker==24.0.0

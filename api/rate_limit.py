@@ -1,8 +1,10 @@
 """
 Rate limiting middleware using in-memory storage.
 
-For production, consider using Redis-backed rate limiting
-(e.g., slowapi with Redis backend).
+TODO (prod at scale): move to Redis-backed limiting (e.g. slowapi +
+redis) so limits are shared across API replicas. The current in-memory
+dict is per-process and resets on restart — fine for single-node demo,
+not for horizontal scaling.
 """
 
 import time
