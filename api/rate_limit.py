@@ -103,14 +103,19 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 
-async def check_rate_limit(request: Request, api_key: str = None) -> Dict[str, int]:
+def check_rate_limit(request: Request, api_key: str = None) -> Dict[str, int]:
     """
-    FastAPI dependency for rate limiting.
+    Enforce the rate limit and return the X-RateLimit-* headers to attach.
+
+    Deliberately synchronous: the endpoints in api/main.py are sync and call
+    this directly. (It used to be `async def`, so those calls got back an
+    un-awaited coroutine and every authenticated /score request 500'd.)
 
     Usage:
         @app.get("/endpoint")
-        async def endpoint(request: Request, api_key: str = Depends(get_api_key)):
-            check_rate_limit(request, api_key)
+        def endpoint(request: Request, response: Response, api_key: str = Depends(get_api_key)):
+            for k, v in check_rate_limit(request, api_key).items():
+                response.headers[k] = v
             ...
     """
     is_allowed, headers = rate_limiter.check_rate_limit(request, api_key)
