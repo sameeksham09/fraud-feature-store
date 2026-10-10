@@ -2,6 +2,7 @@ import json
 import time
 import random
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 from kafka import KafkaProducer
 
@@ -25,6 +26,14 @@ producer = KafkaProducer(
 )
 
 TOPIC = 'raw_transactions'
+
+# Labels go to a SEPARATE topic, simulating a chargeback/label feed. The
+# transaction stream itself never carries the label (as in production), so
+# features can't leak it. Spark lands these in s3://features/labels/ and
+# `models/train.py --historical` joins them with point-in-time features via
+# Feast. In production labels arrive days or weeks later; here they're emitted
+# immediately so a demo run produces a trainable dataset in minutes.
+LABEL_TOPIC = 'fraud_labels'
 
 # ── Retry helper ────────────────────────────────────────────────────────────
 MAX_RETRIES = 3
@@ -66,6 +75,14 @@ while True:
     # Send with retry (don't block on waiting for ack in the main loop)
     future = producer.send(TOPIC, value=transaction)
     future.add_errback(lambda exc: print(f"  ⚠️  Async send error: {exc}"))
+
+    label_future = producer.send(LABEL_TOPIC, value={
+        "transaction_id": transaction["transaction_id"],
+        "user_id": user_id,
+        "is_fraud": bool(is_fraud),
+        "label_timestamp": datetime.utcnow().isoformat(),
+    })
+    label_future.add_errback(lambda exc: print(f"  ⚠️  Label send error: {exc}"))
 
     tx_count += 1
     success_count += 1

@@ -15,181 +15,148 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class TestTrainingDataGeneration:
-    """Tests for the synthetic training data generation."""
+    """Tests that exercise models/train.py itself (not re-implementations of it)."""
 
-    def test_generates_10000_rows(self):
-        """Training data should have 10,000 rows."""
-        np.random.seed(42)
-        N = 10_000
+    @pytest.fixture(scope="class")
+    def raw(self):
+        from models.train import generate_synthetic_data
+        return generate_synthetic_data(n=2000, seed=7)
 
-        txn_count_5min = np.random.randint(1, 21, N)
+    def test_row_count(self, raw):
+        assert len(raw) == 2000
 
-        assert len(txn_count_5min) == N
+    def test_has_transaction_and_window_columns(self, raw):
+        from features import WINDOWED_FEATURES
+        for col in WINDOWED_FEATURES + ["amount", "merchant_country", "fraud"]:
+            assert col in raw.columns
 
-    def test_txn_count_in_range(self):
-        """Transaction count should be between 1 and 20."""
-        np.random.seed(42)
-        N = 1000
+    def test_txn_count_in_range(self, raw):
+        assert raw["txn_count_5min"].between(1, 20).all()
 
-        txn_count_5min = np.random.randint(1, 21, N)
+    def test_amounts_positive(self, raw):
+        assert (raw["amount"] > 0).all()
+        assert (raw["total_amount_5min"] > 0).all()
 
-        assert txn_count_5min.min() >= 1
-        assert txn_count_5min.max() <= 20
+    def test_both_classes_present(self, raw):
+        assert set(raw["fraud"].unique()) == {0, 1}
 
-    def test_amounts_are_positive(self):
-        """All amounts should be positive."""
-        np.random.seed(42)
-        N = 1000
+    def test_deterministic_with_seed(self):
+        from models.train import generate_synthetic_data
+        a = generate_synthetic_data(n=200, seed=1)
+        b = generate_synthetic_data(n=200, seed=1)
+        pd.testing.assert_frame_equal(a, b)
 
-        total_amount_5min = np.random.uniform(10, 5000, N)
 
-        assert (total_amount_5min > 0).all()
+class TestTrainingServingParity:
+    """
+    Guards against training/serving skew: training must derive features exactly
+    the way the API does at request time.
+    """
 
-    def test_is_foreign_binary(self):
-        """is_foreign should be 0 or 1."""
-        np.random.seed(42)
-        N = 1000
+    @pytest.fixture(scope="class")
+    def raw(self):
+        from models.train import generate_synthetic_data
+        return generate_synthetic_data(n=500, seed=3)
 
-        is_foreign = np.random.randint(0, 2, N)
+    def test_feature_matrix_columns_match_api_order(self, raw):
+        from models.train import build_feature_matrix
+        from features import FEATURE_ORDER
+        assert list(build_feature_matrix(raw).columns) == FEATURE_ORDER
 
-        assert set(is_foreign).issubset({0, 1})
+    def test_every_row_matches_serving_path(self, raw):
+        """Rebuild each row the way the API does (Redis hash of strings) and compare."""
+        from models.train import build_feature_matrix
+        from features import build_feature_vector, WINDOWED_FEATURES, FEATURE_ORDER
 
-    def test_is_high_amount_derived_correctly(self):
-        """is_high_amount should be 1 when max_amount > 500."""
-        max_amounts = np.array([100, 500, 501, 1000])
-        is_high_amount = (max_amounts > 500).astype(int)
+        X = build_feature_matrix(raw)
+        for i, rec in raw.iterrows():
+            redis_hash = {k: str(rec[k]) for k in WINDOWED_FEATURES}  # Redis stores strings
+            served = build_feature_vector(redis_hash, rec["amount"], rec["merchant_country"])
+            assert [served[f] for f in FEATURE_ORDER] == pytest.approx(X.loc[i].tolist())
 
-        assert is_high_amount[0] == 0  # 100 <= 500
-        assert is_high_amount[1] == 0  # 500 <= 500
-        assert is_high_amount[2] == 1  # 501 > 500
-        assert is_high_amount[3] == 1  # 1000 > 500
+    def test_flags_use_transaction_amount_not_aggregates(self):
+        """A small transaction stays 'not high' even if the user's 5-min max is huge."""
+        from models.train import build_feature_matrix
+        row = pd.DataFrame([{
+            "txn_count_5min": 3, "total_amount_5min": 9000.0,
+            "avg_amount_5min": 3000.0, "max_amount_5min": 8000.0,
+            "amount": 25.0, "merchant_country": "NG",
+        }])
+        X = build_feature_matrix(row).iloc[0]
+        assert X["is_high_amount"] == 0.0   # 25 <= 500, regardless of max_amount_5min
+        assert X["is_suspicious"] == 0.0    # 25 <= 200, regardless of avg_amount_5min
+        assert X["is_foreign"] == 1.0
 
-    def test_is_suspicious_combined_condition(self):
-        """is_suspicious should be 1 when is_foreign=1 AND avg_amount > 200."""
-        is_foreign = np.array([0, 1, 0, 1])
-        avg_amount = np.array([100, 201, 100, 201])
+    def test_missing_windowed_features_default_to_zero(self):
+        """NaN from an offline join == missing Redis key at serving time."""
+        from models.train import build_feature_matrix
+        from features import build_feature_vector
+        row = pd.DataFrame([{
+            "txn_count_5min": np.nan, "total_amount_5min": np.nan,
+            "avg_amount_5min": np.nan, "max_amount_5min": np.nan,
+            "amount": 700.0, "merchant_country": "US",
+        }])
+        offline = build_feature_matrix(row).iloc[0].to_dict()
+        online = build_feature_vector({}, 700.0, "US")
+        assert offline == online
 
-        is_suspicious = ((is_foreign == 1) & (avg_amount > 200)).astype(int)
 
-        assert is_suspicious[0] == 0  # not foreign
-        assert is_suspicious[1] == 1  # foreign + high avg
-        assert is_suspicious[2] == 0  # foreign but low avg
-        assert is_suspicious[3] == 1  # foreign + high avg
+class TestHistoricalMode:
+    """--historical must fail loudly, never silently train on synthetic data."""
 
-    def test_fraud_label_rule(self):
-        """Fraud label should be 1 when:
-        - (is_suspicious=1 AND max_amount > 500) OR
-        - (txn_count > 10 AND is_foreign=1)
-        """
-        import numpy as np
-        # Test case 1: suspicious + high amount = fraud
-        is_suspicious = 1
-        max_amount_5min = 600
-        txn_count_5min = 5
-        is_foreign = 1
+    def test_rejects_too_little_data(self):
+        from models.train import validate_training_data, HistoricalDataError
+        df = pd.DataFrame({"fraud": [0] * 50 + [1] * 2})
+        with pytest.raises(HistoricalDataError):
+            validate_training_data(df, min_rows=200, min_fraud=5)
 
-        fraud = int(
-            ((is_suspicious == 1) & (max_amount_5min > 500)) |
-            ((txn_count_5min > 10) & (is_foreign == 1))
-        )
+    def test_accepts_enough_data(self):
+        from models.train import validate_training_data
+        df = pd.DataFrame({"fraud": [0] * 300 + [1] * 10})
+        validate_training_data(df, min_rows=200, min_fraud=5)
 
-        assert fraud == 1
+    def test_missing_feast_raises(self, monkeypatch):
+        import models.train as train
+        monkeypatch.setattr(train, "FEAST_AVAILABLE", False)
+        with pytest.raises(train.HistoricalDataError):
+            train.load_historical_data()
 
-    def test_fraud_label_not_fraud_case(self):
-        """Fraud should be 0 when neither condition is met."""
-        import numpy as np
-        is_suspicious = 0
-        max_amount_5min = 100
-        txn_count_5min = 3
-        is_foreign = 0
+    def test_labeled_transactions_join(self, tmp_path):
+        """Bronze JSON + label Parquet -> Feast entity df."""
+        from models.train import load_labeled_transactions
+        bronze = tmp_path / "bronze"
+        labels = tmp_path / "labels"
+        bronze.mkdir()
+        labels.mkdir()
+        pd.DataFrame([
+            {"transaction_id": "t1", "user_id": "u1", "amount": 10.0,
+             "merchant_country": "US", "timestamp": "2026-01-01T12:00:30"},
+            {"transaction_id": "t2", "user_id": "u2", "amount": 900.0,
+             "merchant_country": "NG", "timestamp": "2026-01-01T12:01:00"},
+            {"transaction_id": "t3", "user_id": "u3", "amount": 5.0,
+             "merchant_country": "US", "timestamp": "2026-01-01T12:02:00"},  # unlabeled
+        ]).to_json(bronze / "part-00000.json", orient="records", lines=True)
+        pd.DataFrame({"transaction_id": ["t1", "t2"], "is_fraud": [False, True]}) \
+            .to_parquet(labels / "part-00000.parquet")
 
-        fraud = int(
-            ((is_suspicious == 1) & (max_amount_5min > 500)) |
-            ((txn_count_5min > 10) & (is_foreign == 1))
-        )
-
-        assert fraud == 0
-
-    def test_fraud_label_high_count_foreign(self):
-        """High transaction count + foreign should be fraud."""
-        import numpy as np
-        is_suspicious = 0
-        max_amount_5min = 100
-        txn_count_5min = 15
-        is_foreign = 1
-
-        fraud = int(
-            ((is_suspicious == 1) & (max_amount_5min > 500)) |
-            ((txn_count_5min > 10) & (is_foreign == 1))
-        )
-
-        assert fraud == 1
-
-    def test_dataframe_has_all_columns(self):
-        """DataFrame should have all required columns."""
-        N = 100
-
-        txn_count_5min = np.random.randint(1, 21, N)
-        total_amount_5min = np.random.uniform(10, 5000, N)
-        avg_amount_5min = np.random.uniform(10, 2500, N)
-        max_amount_5min = np.random.uniform(10, 5000, N)
-        is_foreign = np.random.randint(0, 2, N)
-        is_high_amount = (max_amount_5min > 500).astype(int)
-        is_suspicious = ((is_foreign == 1) & (avg_amount_5min > 200)).astype(int)
-        fraud = np.zeros(N).astype(int)
-
-        df = pd.DataFrame({
-            "txn_count_5min": txn_count_5min,
-            "total_amount_5min": total_amount_5min,
-            "avg_amount_5min": avg_amount_5min,
-            "max_amount_5min": max_amount_5min,
-            "is_foreign": is_foreign,
-            "is_high_amount": is_high_amount,
-            "is_suspicious": is_suspicious,
-            "fraud": fraud,
-        })
-
-        expected_columns = [
-            "txn_count_5min", "total_amount_5min", "avg_amount_5min",
-            "max_amount_5min", "is_foreign", "is_high_amount",
-            "is_suspicious", "fraud"
-        ]
-
-        assert list(df.columns) == expected_columns
+        df = load_labeled_transactions(str(bronze), str(labels)).set_index("transaction_id")
+        assert set(df.index) == {"t1", "t2"}            # inner join drops unlabeled
+        assert df.loc["t2", "fraud"] == 1
+        assert str(df["event_timestamp"].dt.tz) == "UTC"
+        assert df.loc["t1", "event_timestamp"] == pd.Timestamp("2026-01-01T12:00:30Z")
 
 
 class TestFeatureOrder:
-    """Tests for feature order matching."""
+    """Feature order is defined once, in features/, and shared."""
 
     def test_feature_list_has_7_features(self):
-        """FEATURES should have exactly 7 features."""
-        FEATURES = [
-            "txn_count_5min", "total_amount_5min", "avg_amount_5min",
-            "max_amount_5min", "is_foreign", "is_high_amount", "is_suspicious",
-        ]
+        from features import FEATURE_ORDER
+        assert len(FEATURE_ORDER) == 7
 
-        assert len(FEATURES) == 7
-
-    def test_feature_order_matches_api(self):
-        """Feature order should match what's expected by the API."""
-        # This is the source of truth from api/main.py
-        API_FEATURE_ORDER = [
-            "txn_count_5min",
-            "total_amount_5min",
-            "avg_amount_5min",
-            "max_amount_5min",
-            "is_foreign",
-            "is_high_amount",
-            "is_suspicious",
-        ]
-
-        # This is from train.py
-        TRAIN_FEATURES = [
-            "txn_count_5min", "total_amount_5min", "avg_amount_5min",
-            "max_amount_5min", "is_foreign", "is_high_amount", "is_suspicious",
-        ]
-
-        assert API_FEATURE_ORDER == TRAIN_FEATURES
+    def test_api_uses_shared_feature_order(self):
+        from features import FEATURE_ORDER
+        from api.main import FEATURE_ORDER as API_ORDER
+        assert API_ORDER is FEATURE_ORDER
 
 
 class TestModelMetrics:

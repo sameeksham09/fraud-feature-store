@@ -1,29 +1,39 @@
 """
 Phase 5: XGBoost Fraud Detection Model
 
-This script can run in two modes:
-1. SYNTHETIC (default): Generates synthetic data for quick iteration
-2. HISTORICAL: Uses Feast to pull real features from the offline Parquet store
+Two data modes, ONE feature path. Both modes build the model input with
+features.build_feature_vector(), the same function the API calls at serving
+time, so training and serving can't drift apart.
+
+1. SYNTHETIC (default): generated windowed aggregates + a transaction.
+2. HISTORICAL (--historical): real point-in-time features from Feast.
+   Entity rows = transactions from the Bronze log joined with labels from the
+   simulated chargeback feed; Feast's get_historical_features() attaches the
+   windowed aggregates as they were *before* each transaction.
 
 Usage:
-    python models/train.py                 # Synthetic mode (default)
-    python models/train.py --historical   # Historical mode (requires data in Parquet)
+    python models/train.py                 # synthetic (default)
+    python models/train.py --historical    # Feast offline store
 
-For historical mode, first run:
+For historical mode:
     1. docker compose up -d
-    2. python producer/produce_transactions.py  # Run for ~5 minutes
-    3. python spark/feature_engineering.py       # Let it process
+    2. python producer/produce_transactions.py   # leave running ~20+ minutes
+    3. python spark/feature_engineering.py       # Silver windows are written
+                                                 # ~15 min after the fact
+                                                 # (5m window + 10m watermark)
+    4. make feast-apply                          # registers the feature view
+    5. python models/train.py --historical
 
-Then run:
-    cd feast && feast apply && cd ..
-    python models/train.py --historical
+Historical mode fails with a clear error (it does NOT fall back to synthetic
+data) if Feast isn't installed or there isn't enough labeled data yet.
 
-Note: In production, fraud labels come from delayed chargeback reports
+Note: in production, fraud labels come from delayed chargeback reports
 (typically 30-90 days later), not from the streaming pipeline.
 """
 
 import os
 import sys
+import glob
 import argparse
 import numpy as np
 import pandas as pd
@@ -43,19 +53,17 @@ from sklearn.metrics import (
 
 # Add project root to path for shared modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from features import (
-    compute_is_foreign,
-    compute_is_high_amount,
-    compute_is_suspicious,
-    HIGH_AMOUNT_THRESHOLD,
-    SUSPICIOUS_AMOUNT_THRESHOLD,
+from features import (  # noqa: E402
+    FEATURE_ORDER,
+    WINDOWED_FEATURES,
+    build_feature_vector,
 )
 
-# Add feast to path if available
 try:
     from feast import FeatureStore
     FEAST_AVAILABLE = True
 except ImportError:
+    FeatureStore = None  # type: ignore
     FEAST_AVAILABLE = False
 
 
@@ -63,104 +71,256 @@ except ImportError:
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MLRUNS_DIR   = os.path.join(PROJECT_ROOT, "mlruns")
 ARTIFACT_DIR = os.path.join(PROJECT_ROOT, "models", "artifacts")
-os.makedirs(ARTIFACT_DIR, exist_ok=True)
+FEAST_REPO   = os.path.join(PROJECT_ROOT, "feast")
+FEATURE_VIEW = "user_transaction_features"
 
-mlflow.set_tracking_uri(f"file://{MLRUNS_DIR}")
-mlflow.set_experiment("fraud_detection")
+# Offline store locations (written by spark/feature_engineering.py)
+BRONZE_TRANSACTIONS_PATH = "s3://features/bronze/raw_transactions/"
+LABELS_PATH              = "s3://features/labels/"
 
+MIN_HISTORICAL_ROWS  = 200
+MIN_HISTORICAL_FRAUD = 5
+
+
+class HistoricalDataError(RuntimeError):
+    """Raised when historical training can't run; never silently falls back."""
+
+
+# ── 1. Feature matrix (shared with serving) ──────────────────────────────────
+
+def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Turn rows of {windowed aggregates, amount, merchant_country} into the model
+    input, using the exact function the API uses at serving time.
+    """
+    rows = [
+        build_feature_vector(
+            {name: rec.get(name) for name in WINDOWED_FEATURES},
+            rec["amount"],
+            rec["merchant_country"],
+        )
+        for rec in df.to_dict("records")
+    ]
+    return pd.DataFrame(rows, columns=FEATURE_ORDER, index=df.index)
+
+
+# ── 2. Synthetic data ─────────────────────────────────────────────────────────
 
 def generate_synthetic_data(n: int = 10_000, seed: int = 42) -> pd.DataFrame:
     """
-    Generate synthetic training data (for development/testing).
+    Generate synthetic raw training rows (for development/testing).
 
-    In production, this would be replaced with historical features from Feast
-    combined with labels from chargeback data.
+    Each row is a transaction being scored (amount, merchant_country) plus the
+    user's trailing-5-minute aggregates, i.e. exactly what the API has at
+    request time. Features are derived later by build_feature_matrix().
     """
     print("Generating synthetic dataset...")
-    np.random.seed(seed)
-
-    # Generate base features
-    txn_count_5min    = np.random.randint(1, 21, n)
-    total_amount_5min = np.random.uniform(10, 5000, n)
-    avg_amount_5min   = np.random.uniform(10, 2500, n)
-    max_amount_5min   = np.random.uniform(10, 5000, n)
-
-    # Generate merchant country (80% US, 20% foreign)
-    merchant_countries = np.random.choice(["US", "non-US"], n, p=[0.8, 0.2])
-    is_foreign = np.array([1 if c != "US" else 0 for c in merchant_countries])
-
-    # Compute transaction flags using shared module functions
-    is_high_amount = np.array([
-        compute_is_high_amount(amt) for amt in max_amount_5min
-    ])
-    is_suspicious = np.array([
-        compute_is_suspicious(country, amt)
-        for country, amt in zip(merchant_countries, avg_amount_5min)
-    ])
-
-    # Fraud label rule (same as used in Spark feature engineering):
-    #   fraud=1 if (is_suspicious=1 AND max_amount > 500)
-    #           OR (txn_count > 10 AND is_foreign=1)
-    fraud = (
-        ((is_suspicious == 1) & (max_amount_5min > 500)) |
-        ((txn_count_5min > 10) & (is_foreign == 1))
-    ).astype(int)
+    rng = np.random.RandomState(seed)
 
     df = pd.DataFrame({
-        "txn_count_5min":    txn_count_5min,
-        "total_amount_5min": total_amount_5min,
-        "avg_amount_5min":   avg_amount_5min,
-        "max_amount_5min":   max_amount_5min,
-        "is_foreign":        is_foreign,
-        "is_high_amount":    is_high_amount,
-        "is_suspicious":     is_suspicious,
-        "fraud":             fraud,
+        "txn_count_5min":    rng.randint(1, 21, n),
+        "total_amount_5min": rng.uniform(10, 5000, n),
+        "avg_amount_5min":   rng.uniform(10, 2500, n),
+        "max_amount_5min":   rng.uniform(10, 5000, n),
+        # The transaction being scored
+        "amount":            rng.uniform(1, 5000, n).round(2),
+        "merchant_country":  rng.choice(["US", "NG", "RU", "CN", "GB"], n,
+                                        p=[0.8, 0.05, 0.05, 0.05, 0.05]),
     })
 
-    fraud_rate = fraud.mean() * 100
-    print(f"  Dataset: {n} rows | fraud rate: {fraud_rate:.1f}%")
+    feats = build_feature_matrix(df)
+
+    # Synthetic fraud rule, expressed on the same features the model sees:
+    #   fraud=1 if (suspicious transaction AND it's a high amount)
+    #           OR (bursty user, >10 txns in 5 min, AND foreign transaction)
+    df["fraud"] = (
+        ((feats["is_suspicious"] == 1) & (feats["is_high_amount"] == 1)) |
+        ((feats["txn_count_5min"] > 10) & (feats["is_foreign"] == 1))
+    ).astype(int)
+
+    print(f"  Dataset: {n} rows | fraud rate: {df['fraud'].mean() * 100:.1f}%")
     return df
 
 
-def load_historical_data() -> pd.DataFrame:
-    """
-    Load historical features from Feast offline store (Parquet in MinIO).
+# ── 3. Historical data (Feast) ────────────────────────────────────────────────
 
-    This is the production approach: pull features from the offline store,
-    then join with labels from the label store (chargeback data).
+def _minio_storage_options() -> dict:
+    """fsspec/s3fs options for MinIO, from the same env vars Spark uses."""
+    return {
+        "key": os.environ.get("MINIO_ACCESS_KEY", "minioadmin"),
+        "secret": os.environ.get("MINIO_SECRET_KEY", "minioadmin"),
+        "client_kwargs": {
+            "endpoint_url": os.environ.get("MINIO_ENDPOINT", "http://localhost:9000"),
+        },
+    }
 
-    Returns a DataFrame with features and labels.
+
+def _configure_feast_s3_env() -> None:
+    """Feast's file offline store reads s3:// via PyArrow, which uses AWS_* env vars."""
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", os.environ.get("MINIO_ACCESS_KEY", "minioadmin"))
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", os.environ.get("MINIO_SECRET_KEY", "minioadmin"))
+    os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+
+
+def _read_json_lines(path: str, storage_options=None) -> pd.DataFrame:
+    """Read every Spark JSON part file under a directory (local or s3://)."""
+    if path.startswith("s3://"):
+        import s3fs
+        fs = s3fs.S3FileSystem(
+            key=storage_options["key"], secret=storage_options["secret"],
+            client_kwargs=storage_options["client_kwargs"],
+        )
+        files = [f for f in fs.glob(path.rstrip("/") + "/part-*.json")]
+        frames = []
+        for f in files:
+            with fs.open(f) as fh:
+                frames.append(pd.read_json(fh, lines=True))
+    else:
+        files = sorted(glob.glob(os.path.join(path, "part-*.json")))
+        frames = [pd.read_json(f, lines=True) for f in files]
+    frames = [f for f in frames if not f.empty]
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def load_labeled_transactions(
+    transactions_path: str = BRONZE_TRANSACTIONS_PATH,
+    labels_path: str = LABELS_PATH,
+    storage_options=None,
+) -> pd.DataFrame:
     """
+    Build the Feast entity DataFrame: one row per labeled transaction with
+    user_id, event_timestamp (when the transaction happened), the transaction's
+    own amount + merchant_country, and the fraud label.
+    """
+    if storage_options is None and transactions_path.startswith("s3://"):
+        storage_options = _minio_storage_options()
+
+    try:
+        txns = _read_json_lines(transactions_path, storage_options)
+        labels = pd.read_parquet(labels_path, storage_options=storage_options)
+    except ImportError as exc:
+        raise HistoricalDataError(
+            f"Missing dependency for reading MinIO ({exc}). Run `make install` "
+            "(needs s3fs from requirements.txt)."
+        ) from exc
+    except FileNotFoundError as exc:
+        raise HistoricalDataError(
+            f"Offline data not found ({exc}). Run the producer and the Spark job "
+            "for a while first so Bronze transactions and labels exist in MinIO."
+        ) from exc
+    except Exception as exc:  # e.g. MinIO not running, bad credentials
+        raise HistoricalDataError(
+            f"Could not read offline data from {transactions_path} / {labels_path}: "
+            f"{type(exc).__name__}: {exc}. Is MinIO up (`make up`)?"
+        ) from exc
+
+    if txns.empty or labels.empty:
+        raise HistoricalDataError(
+            "No transactions or labels in the offline store yet. Run "
+            "producer/produce_transactions.py and spark/feature_engineering.py first."
+        )
+
+    txns = txns[["transaction_id", "user_id", "amount", "merchant_country", "timestamp"]]
+    labels = labels[["transaction_id", "is_fraud"]].drop_duplicates("transaction_id")
+
+    entity_df = txns.merge(labels, on="transaction_id", how="inner")
+    # Producer timestamps are naive UTC ISO strings
+    entity_df["event_timestamp"] = pd.to_datetime(entity_df["timestamp"], utc=True)
+    entity_df["fraud"] = entity_df["is_fraud"].astype(int)
+    return entity_df.drop(columns=["timestamp", "is_fraud"]).reset_index(drop=True)
+
+
+def _users_with_feature_rows(store) -> set:
+    """user_ids that have at least one window in the feature view's offline source."""
+    import pyarrow.dataset as pads
+    from feast.infra.offline_stores.file_source import FileSource as FeastFileSource
+
+    source = store.get_feature_view(FEATURE_VIEW).batch_source
+    filesystem, path = FeastFileSource.create_filesystem_and_path(
+        source.path, source.s3_endpoint_override
+    )
+    # Spark's _spark_metadata/ is skipped (default ignore_prefixes: "." and "_")
+    dataset = pads.dataset(path, filesystem=filesystem, format="parquet")
+    return set(dataset.to_table(columns=["user_id"]).column("user_id").to_pylist())
+
+
+def build_historical_training_set(store, entity_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Attach point-in-time windowed features to each labeled transaction.
+
+    For a transaction at time t, Feast joins the latest window with
+    window_end <= t (within the feature view TTL), so no feature can include
+    the transaction itself or anything after it.
+
+    Every input row is kept. A transaction with no prior window (e.g. a
+    user's first transaction) gets NaN windowed features, which
+    build_feature_vector() turns into 0.0, the same as a missing Redis key at
+    serving time. Feast's file offline store (dask) doesn't handle that case
+    itself: it crashes if a user has no windows at all, and silently drops rows
+    whose windows all fall outside the TTL. Those are often first-time foreign
+    transactions, i.e. disproportionately fraud. So we only send users that
+    have windows, and left-join the result back onto every entity row.
+    """
+    feature_refs = [f"{FEATURE_VIEW}:{name}" for name in WINDOWED_FEATURES]
+
+    entity_df = entity_df.reset_index(drop=True).copy()
+    entity_df["_row_id"] = range(len(entity_df))
+
+    known_users = _users_with_feature_rows(store)
+    to_query = entity_df[entity_df["user_id"].isin(known_users)]
+
+    if len(to_query):
+        feats = store.get_historical_features(
+            entity_df=to_query,
+            features=feature_refs,
+        ).to_df()[["_row_id"] + WINDOWED_FEATURES]
+    else:
+        feats = pd.DataFrame(columns=["_row_id"] + WINDOWED_FEATURES)
+
+    out = entity_df.merge(feats, on="_row_id", how="left")
+    assert len(out) == len(entity_df), "point-in-time join must keep every labeled row"
+    return out.drop(columns="_row_id")
+
+
+def load_historical_data(
+    min_rows: int = MIN_HISTORICAL_ROWS,
+    min_fraud: int = MIN_HISTORICAL_FRAUD,
+) -> pd.DataFrame:
+    """Labeled transactions + point-in-time features from the Feast offline store."""
     if not FEAST_AVAILABLE:
-        raise ImportError("Feast is not installed. Install with: pip install feast")
+        raise HistoricalDataError("Feast is not installed. Install with: pip install feast")
+    if not os.path.exists(os.path.join(FEAST_REPO, "registry.db")):
+        raise HistoricalDataError("Feast registry not found. Run `make feast-apply` first.")
 
     print("Loading historical data from Feast offline store...")
+    _configure_feast_s3_env()
 
-    # Load Feast feature store
-    feast_repo = os.path.join(PROJECT_ROOT, "feast")
-    store = FeatureStore(repo_path=feast_repo)
+    entity_df = load_labeled_transactions()
+    print(f"  Labeled transactions: {len(entity_df)} "
+          f"({int(entity_df['fraud'].sum())} fraud)")
 
-    # Get the entity dataframe (list of users with event timestamps)
-    # In production, this would come from your label store
-    # For demo, we'll create entity timestamps from the last 24 hours
-    from datetime import datetime, timedelta
+    store = FeatureStore(repo_path=FEAST_REPO)
+    df = build_historical_training_set(store, entity_df)
 
-    # Get feature view
-    feature_view = store.get_feature_view("user_transaction_features")
+    matched = df[WINDOWED_FEATURES].notna().all(axis=1).sum()
+    print(f"  Rows with point-in-time features: {matched}/{len(df)} "
+          "(rest = no activity in the prior window -> 0.0)")
 
-    # Get entity DataFrame - in production this would be your labeled data
-    # For now, we'll query recent entities from Redis or create sample entities
-    # This is a simplified version - production would join with actual labels
+    validate_training_data(df, min_rows=min_rows, min_fraud=min_fraud)
+    return df
 
-    # For demonstration, let's try to get some entities
-    # Note: In real production, you'd have a label table with user_id, event_time, is_fraud
 
-    print("  Note: Historical mode requires chargeback labels from a label store.")
-    print("  For demo purposes, falling back to synthetic data generation.")
-    print("  In production: labels come from chargeback data, not the stream.")
-
-    # Fallback to synthetic for demo
-    return generate_synthetic_data()
+def validate_training_data(df: pd.DataFrame, min_rows: int, min_fraud: int) -> None:
+    """Refuse to train on too little data instead of producing a meaningless model."""
+    n_fraud = int(df["fraud"].sum())
+    n_legit = len(df) - n_fraud
+    if len(df) < min_rows or n_fraud < min_fraud or n_legit < min_fraud:
+        raise HistoricalDataError(
+            f"Not enough labeled history to train: {len(df)} rows, {n_fraud} fraud "
+            f"(need >= {min_rows} rows and >= {min_fraud} of each class). "
+            "Leave the producer + Spark job running longer; Silver windows land "
+            "~15 minutes after the transactions they summarize."
+        )
 
 
 def train_model(
@@ -245,20 +405,23 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load data
-    if args.historical and FEAST_AVAILABLE:
-        df = load_historical_data()
+    os.makedirs(ARTIFACT_DIR, exist_ok=True)
+    mlflow.set_tracking_uri(f"file://{MLRUNS_DIR}")
+    mlflow.set_experiment("fraud_detection")
+
+    # Load raw rows (windowed aggregates + transaction + label)
+    if args.historical:
+        try:
+            df = load_historical_data()
+        except HistoricalDataError as exc:
+            print(f"\n❌ Historical training unavailable: {exc}")
+            sys.exit(1)
     else:
-        if args.historical and not FEAST_AVAILABLE:
-            print("Warning: Feast not available, using synthetic data")
         df = generate_synthetic_data(n=args.n_samples)
 
-    # Feature columns
-    FEATURES = [
-        "txn_count_5min", "total_amount_5min", "avg_amount_5min",
-        "max_amount_5min", "is_foreign", "is_high_amount", "is_suspicious",
-    ]
-    X = df[FEATURES]
+    # Same feature builder as the API (features.build_feature_vector)
+    FEATURES = FEATURE_ORDER
+    X = build_feature_matrix(df)
     y = df["fraud"]
 
     # Train / test split (80 / 20)

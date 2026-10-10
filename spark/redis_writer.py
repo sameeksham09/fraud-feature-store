@@ -5,6 +5,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# A "last 5 minutes" aggregate is meaningless once 5 minutes pass with no new
+# activity, so the key expires instead of serving a stale window for hours.
+# The API then sees no key and uses 0.0, which matches what training sees
+# offline (Feast TTL in feast/features.py).
+USER_FEATURES_TTL_SECONDS = 5 * 60
+TXN_FLAGS_TTL_SECONDS = 60 * 60
+
 redis_client = redis.Redis(
     host=os.environ.get("REDIS_HOST", "localhost"),
     port=int(os.environ.get("REDIS_PORT", "6379")),
@@ -35,7 +42,7 @@ def write_user_features_to_redis(row):
     # Use pipeline for atomic write
     pipe = redis_client.pipeline()
     pipe.hset(key, mapping=features)
-    pipe.expire(key, 86400)  # 24 hours TTL
+    pipe.expire(key, USER_FEATURES_TTL_SECONDS)
     pipe.execute()
 
     print(f"  → Redis write: {user_id} | txn_count={features['txn_count_5min']} | avg=${features['avg_amount_5min']}")
@@ -62,5 +69,5 @@ def write_transaction_flags_to_redis(row):
     # Use pipeline for atomic write
     pipe = redis_client.pipeline()
     pipe.hset(key, mapping=flags)
-    pipe.expire(key, 3600)  # 1 hour TTL
+    pipe.expire(key, TXN_FLAGS_TTL_SECONDS)
     pipe.execute()

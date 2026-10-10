@@ -250,8 +250,77 @@ class TestRedisKeyFormat:
 
     def test_ttl_values(self):
         """TTL values should be appropriate."""
-        USER_FEATURE_TTL = 86400  # 24 hours
-        TXN_FLAG_TTL = 3600  # 1 hour
+        from spark.redis_writer import USER_FEATURES_TTL_SECONDS, TXN_FLAGS_TTL_SECONDS
 
-        assert USER_FEATURE_TTL == 24 * 60 * 60  # 86400
-        assert TXN_FLAG_TTL == 60 * 60  # 3600
+        assert USER_FEATURES_TTL_SECONDS == 5 * 60
+        assert TXN_FLAGS_TTL_SECONDS == 60 * 60
+
+
+class TestScoreUsesTrainingFeaturePath:
+    """/score must build features exactly like models/train.py does (no skew)."""
+
+    def _client(self, monkeypatch, redis_hash):
+        from fastapi.testclient import TestClient
+        import api.main as main
+
+        class StubModel:
+            def __init__(self):
+                self.last_X = None
+
+            def predict_proba(self, X):
+                self.last_X = X
+                return [[0.9, 0.1]]
+
+        stub = StubModel()
+        monkeypatch.setattr(main, "_model", stub)
+        monkeypatch.setattr(main, "_fetch_user_features", lambda uid: (redis_hash, bool(redis_hash)))
+        # check_rate_limit is NOT mocked: the real limiter runs end to end
+        return TestClient(main.app), stub
+
+    def test_features_match_training_builder(self, monkeypatch):
+        import pandas as pd
+        from models.train import build_feature_matrix
+        from features import FEATURE_ORDER
+
+        redis_hash = {"txn_count_5min": "3", "total_amount_5min": "9000.0",
+                      "avg_amount_5min": "3000.0", "max_amount_5min": "8000.0"}
+        client, stub = self._client(monkeypatch, redis_hash)
+        api_key = __import__("api.auth", fromlist=["API_KEYS"]).API_KEYS[0]
+        resp = client.post("/score", headers={"X-API-Key": api_key}, json={
+            "user_id": "user_0001", "amount": 25.0,
+            "merchant_category": "grocery", "merchant_country": "NG",
+        })
+        assert resp.status_code == 200, resp.text
+
+        expected = build_feature_matrix(pd.DataFrame([{
+            **{k: float(v) for k, v in redis_hash.items()},
+            "amount": 25.0, "merchant_country": "NG",
+        }])).iloc[0]
+        served = resp.json()["features_used"]
+        assert [served[f] for f in FEATURE_ORDER] == expected.tolist()
+        assert stub.last_X.tolist()[0] == expected.tolist()
+        # Flags come from the $25 transaction, not the user's $8000 window max
+        assert served["is_high_amount"] == 0.0
+
+    def test_unknown_user_gets_zero_window_features(self, monkeypatch):
+        client, _ = self._client(monkeypatch, {})
+        api_key = __import__("api.auth", fromlist=["API_KEYS"]).API_KEYS[0]
+        resp = client.post("/score", headers={"X-API-Key": api_key}, json={
+            "user_id": "nobody", "amount": 700.0,
+            "merchant_category": "travel", "merchant_country": "US",
+        })
+        body = resp.json()
+        assert body["redis_features_found"] is False
+        assert body["features_used"]["txn_count_5min"] == 0.0
+        assert body["features_used"]["is_high_amount"] == 1.0
+
+    def test_rate_limit_headers_returned(self, monkeypatch):
+        """Regression: check_rate_limit was async and every /score call 500'd."""
+        client, _ = self._client(monkeypatch, {})
+        api_key = __import__("api.auth", fromlist=["API_KEYS"]).API_KEYS[0]
+        resp = client.post("/score", headers={"X-API-Key": api_key}, json={
+            "user_id": "user_0002", "amount": 10.0,
+            "merchant_category": "grocery", "merchant_country": "US",
+        })
+        assert resp.status_code == 200, resp.text
+        assert "x-ratelimit-limit" in {h.lower() for h in resp.headers}

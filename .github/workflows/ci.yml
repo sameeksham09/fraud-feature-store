@@ -43,6 +43,7 @@ jobs:
           python -m py_compile spark/redis_writer.py
           python -m py_compile spark/validation.py
           python -m py_compile spark/quarantine.py
+          python -m py_compile spark/windowing.py
 
           echo "=== Checking API ==="
           python -m py_compile api/main.py
@@ -103,6 +104,8 @@ jobs:
           pip install -r producer/requirements.txt
           pip install -r spark/requirements.txt
           pip install fastapi uvicorn mlflow xgboost scikit-learn pandas numpy matplotlib pydantic prometheus-client python-dotenv
+          # Feast + PySpark (above) let tests/test_historical_feast.py run the real offline path
+          pip install feast==0.40.0
 
       - name: Set environment variables
         run: |

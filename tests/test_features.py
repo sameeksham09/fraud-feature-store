@@ -47,8 +47,8 @@ class TestWriteUserFeaturesToRedis:
         # Check hset was called via pipeline
         mock_redis.pipeline.assert_called_once()
 
-    def test_sets_24h_ttl(self, mock_redis):
-        """User features should have 24 hour TTL (86400 seconds)."""
+    def test_sets_5min_ttl(self, mock_redis):
+        """User features expire 5 minutes after the last write (trailing-window freshness)."""
         from spark.redis_writer import write_user_features_to_redis
 
         row = {
@@ -68,7 +68,7 @@ class TestWriteUserFeaturesToRedis:
         pipe.expire.assert_called()
         call_args = pipe.expire.call_args
         ttl = call_args[0][1]
-        assert ttl == 86400  # 24 hours in seconds
+        assert ttl == 300  # 5 minutes in seconds
 
     def test_includes_all_features_in_hash(self, mock_redis):
         """All features should be stored in the Redis hash."""

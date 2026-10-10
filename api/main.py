@@ -54,12 +54,8 @@ from api.metrics import (
 from api.auth import get_api_key, API_KEY_HEADER
 from api.rate_limit import check_rate_limit
 
-# Import shared feature computation module
-from features import (
-    compute_is_foreign,
-    compute_is_high_amount,
-    compute_is_suspicious,
-)
+# Shared feature contract: the same builder is used by models/train.py
+from features import FEATURE_ORDER, build_feature_vector
 
 # Explainability (SHAP or importance fallback) — optional, never breaks scoring
 try:
@@ -77,15 +73,7 @@ MLRUNS_DIR   = os.path.join(PROJECT_ROOT, "mlruns")
 REDIS_HOST   = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT   = int(os.environ.get("REDIS_PORT", "6379"))
 
-FEATURE_ORDER = [
-    "txn_count_5min",
-    "total_amount_5min",
-    "avg_amount_5min",
-    "max_amount_5min",
-    "is_foreign",
-    "is_high_amount",
-    "is_suspicious",
-]
+# FEATURE_ORDER is imported from features/ (single source of truth)
 
 # ── App state ─────────────────────────────────────────────────────────────────
 _model        = None   # XGBoost model
@@ -231,6 +219,26 @@ def _ensure_redis_connected():
             raise
 
 
+def _fetch_user_features(user_id: str):
+    """
+    Read windowed aggregates for a user from Redis.
+
+    Returns (raw_hash, found). Never raises: if Redis is down or the user has
+    no recent activity, returns ({}, False) and the windowed features fall
+    back to 0.0 in build_feature_vector().
+    """
+    try:
+        _ensure_redis_connected()
+        if _redis_client is not None:
+            raw = _redis_client.hgetall(f"user_features:{user_id}")
+            if raw:
+                return raw, True
+    except Exception as exc:
+        print(f"⚠️  Redis lookup failed: {exc}")
+        ERRORS_TOTAL.labels(error_type='redis_connection').inc()
+    return {}, False
+
+
 # ── Request / Response schemas ────────────────────────────────────────────────
 
 class ScoreRequest(BaseModel):
@@ -342,51 +350,16 @@ def score(
     # Track transaction amount distribution
     TRANSACTION_AMOUNT.observe(req.amount)
 
-    # ── 1. Compute transaction-level flags using shared module
-    # (these come from the current request payload, not the feature store)
-    is_foreign     = compute_is_foreign(req.merchant_country)
-    is_high_amount = compute_is_high_amount(req.amount)
-    is_suspicious  = compute_is_suspicious(req.merchant_country, req.amount)
-
-    # ── 2. Fetch windowed user features from Redis (live aggregates written
+    # ── 1. Fetch windowed user features from Redis (live aggregates written
     # by the Spark streaming job under key `user_features:{user_id}`).
-    redis_features_found = False
-    txn_count_5min    = 0.0
-    total_amount_5min = 0.0
-    avg_amount_5min   = 0.0
-    max_amount_5min   = 0.0
-
     t_redis_start = time.time()
-    try:
-        # Ensure Redis is connected (will reconnect if needed)
-        _ensure_redis_connected()
-        if _redis_client is not None:
-            raw = _redis_client.hgetall(f"user_features:{req.user_id}")
-            if raw:
-                redis_features_found = True
-                txn_count_5min    = float(raw.get("txn_count_5min",    0))
-                total_amount_5min = float(raw.get("total_amount_5min", 0))
-                avg_amount_5min   = float(raw.get("avg_amount_5min",   0))
-                max_amount_5min   = float(raw.get("max_amount_5min", 0))
-    except Exception as exc:
-        print(f"⚠️  Redis lookup failed: {exc}")
-        ERRORS_TOTAL.labels(error_type='redis_connection').inc()
-
-    # Track Redis lookup time
+    user_features, redis_features_found = _fetch_user_features(req.user_id)
     redis_latency = time.time() - t_redis_start
     REDIS_LOOKUP_TIME.observe(redis_latency)
     REDIS_LOOKUPS_TOTAL.labels(found=str(redis_features_found).lower()).inc()
 
-    # ── 3. Build feature vector
-    features = {
-        "txn_count_5min":    txn_count_5min,
-        "total_amount_5min": total_amount_5min,
-        "avg_amount_5min":   avg_amount_5min,
-        "max_amount_5min":   max_amount_5min,
-        "is_foreign":        float(is_foreign),
-        "is_high_amount":    float(is_high_amount),
-        "is_suspicious":     float(is_suspicious),
-    }
+    # ── 2. Build feature vector with the SAME function used in training
+    features = build_feature_vector(user_features, req.amount, req.merchant_country)
     X = np.array([[features[f] for f in FEATURE_ORDER]], dtype=float)
 
     # ── 4. Score (with inference time tracking)
@@ -458,35 +431,9 @@ def explain(
     if not EXPLAIN_AVAILABLE or explain_prediction is None:
         raise HTTPException(status_code=503, detail="Explainability not available (install shap)")
 
-    # Reuse same feature logic as /score
-    is_foreign = compute_is_foreign(req.merchant_country)
-    is_high_amount = compute_is_high_amount(req.amount)
-    is_suspicious = compute_is_suspicious(req.merchant_country, req.amount)
-
-    redis_features_found = False
-    txn_count_5min = total_amount_5min = avg_amount_5min = max_amount_5min = 0.0
-    try:
-        _ensure_redis_connected()
-        if _redis_client is not None:
-            raw = _redis_client.hgetall(f"user_features:{req.user_id}")
-            if raw:
-                redis_features_found = True
-                txn_count_5min = float(raw.get("txn_count_5min", 0))
-                total_amount_5min = float(raw.get("total_amount_5min", 0))
-                avg_amount_5min = float(raw.get("avg_amount_5min", 0))
-                max_amount_5min = float(raw.get("max_amount_5min", 0))
-    except Exception:
-        pass  # explain works even without Redis
-
-    features = {
-        "txn_count_5min": txn_count_5min,
-        "total_amount_5min": total_amount_5min,
-        "avg_amount_5min": avg_amount_5min,
-        "max_amount_5min": max_amount_5min,
-        "is_foreign": float(is_foreign),
-        "is_high_amount": float(is_high_amount),
-        "is_suspicious": float(is_suspicious),
-    }
+    # Same feature path as /score (and as training)
+    user_features, redis_features_found = _fetch_user_features(req.user_id)
+    features = build_feature_vector(user_features, req.amount, req.merchant_country)
     X = np.array([[features[f] for f in FEATURE_ORDER]], dtype=float)
     fraud_prob = float(_model.predict_proba(X)[0][1])
     risk_level = "HIGH" if fraud_prob > 0.7 else ("MEDIUM" if fraud_prob > 0.4 else "LOW")

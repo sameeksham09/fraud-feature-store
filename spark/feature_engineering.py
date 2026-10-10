@@ -24,6 +24,7 @@ from spark.validation import (
     ValidationError,
 )
 from spark.quarantine import write_to_quarantine
+from spark.windowing import select_trailing_window
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -48,6 +49,8 @@ spark = SparkSession.builder \
     .master("local[*]") \
     .config("spark.jars", JARS) \
     .config("spark.sql.shuffle.partitions", "4") \
+    .config("spark.sql.session.timeZone", "UTC") \
+    .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS") \
     .config("spark.hadoop.fs.s3a.endpoint", os.environ.get("MINIO_ENDPOINT", "http://localhost:9000")) \
     .config("spark.hadoop.fs.s3a.access.key", os.environ.get("MINIO_ACCESS_KEY", "minioadmin")) \
     .config("spark.hadoop.fs.s3a.secret.key", os.environ.get("MINIO_SECRET_KEY", "minioadmin")) \
@@ -146,17 +149,12 @@ transactions_with_flags = transactions \
 def write_windowed_batch_to_redis(batch_df, batch_id):
     if batch_df.rdd.isEmpty():
         return
-    # A 5-minute window with a 1-minute slide means a single micro-batch can
-    # contain multiple overlapping windows for the same user. collect() does
-    # not guarantee row order, so writing every row risks an older window
-    # overwriting a newer one in Redis. Keep only the most recent window
-    # (by window_start) per user before writing.
-    latest_per_user = (
-        batch_df
-        .orderBy(F.col("window_start").desc())
-        .dropDuplicates(["user_id"])
-    )
-    for row in latest_per_user.collect():
+    # A 5-minute window with a 1-minute slide means a micro-batch contains up
+    # to 5 overlapping windows per user. Write only the one covering the
+    # trailing 5 minutes (see spark/windowing.py for why "latest window_start"
+    # is wrong: it only covers about the last minute).
+    trailing_per_user = select_trailing_window(batch_df)
+    for row in trailing_per_user.collect():
         row_dict = row.asDict()
         is_valid, errors = validate_user_features(row_dict)
         if not is_valid:
@@ -236,10 +234,42 @@ query3 = txn_count_5min \
     .queryName("windowed_features_s3") \
     .start()
 
+# ── 12. Query 4 — Fraud labels → S3/MinIO (simulated chargeback feed) ───────
+# Labels arrive on their own topic, never in the transaction stream, so no
+# feature can see them. models/train.py --historical joins them to the Bronze
+# transactions and pulls point-in-time features from Feast.
+label_schema = StructType([
+    StructField("transaction_id",  StringType(),  True),
+    StructField("user_id",         StringType(),  True),
+    StructField("is_fraud",        BooleanType(), True),
+    StructField("label_timestamp", StringType(),  True),
+])
+
+labels = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS) \
+    .option("subscribe", "fraud_labels") \
+    .option("startingOffsets", "latest") \
+    .load() \
+    .select(F.from_json(F.col("value").cast("string"), label_schema).alias("l")) \
+    .select("l.*") \
+    .withColumn("label_time", F.to_timestamp("label_timestamp"))
+
+query4 = labels \
+    .writeStream \
+    .outputMode("append") \
+    .format("parquet") \
+    .option("path", "s3a://features/labels/") \
+    .option("checkpointLocation", "/tmp/checkpoints/labels_s3") \
+    .trigger(processingTime="30 seconds") \
+    .queryName("labels_s3") \
+    .start()
+
 print("🚀 Streaming queries started. Waiting for data...\n")
 print("   query0 → raw transactions  → S3/MinIO Bronze  (every 30 seconds)")
 print("   query1 → windowed features → Redis            (every 30 seconds)")
 print("   query2 → transaction flags → Redis            (every 10 seconds)")
 print("   query3 → windowed features → S3/MinIO Silver  (every 30 seconds)")
+print("   query4 → fraud labels      → S3/MinIO labels  (every 30 seconds)")
 
 spark.streams.awaitAnyTermination()

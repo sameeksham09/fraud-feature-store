@@ -26,8 +26,8 @@ def generate_transaction(user_id: str) -> dict:
     """Generate one realistic-ish transaction for a user."""
     # In production, fraud labels come from delayed chargeback reports,
     # not from the real-time stream. We simulate that here by NOT including
-    # is_fraud in the payload. The label is kept locally only for the
-    # producer's logging (to show fraud vs legit in stdout).
+    # is_fraud in the transaction payload. The producer pops the label and
+    # publishes it to a separate `fraud_labels` topic (the simulated label feed).
     _is_fraud = random.random() < 0.03   # ~3% fraud rate (realistic)
 
     if _is_fraud:
@@ -51,6 +51,6 @@ def generate_transaction(user_id: str) -> dict:
         "card_last4": str(random.randint(1000, 9999)),
         "timestamp": datetime.utcnow().isoformat(),
     }
-    # Attach label for local logging only (not sent to Kafka)
+    # Attach label; the producer pops it off and sends it to `fraud_labels`
     transaction["_is_fraud"] = _is_fraud
     return transaction
