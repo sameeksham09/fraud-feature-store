@@ -23,6 +23,7 @@ from spark.validation import (
     validate_transaction_flags,
     ValidationError,
 )
+from spark.quarantine import write_to_quarantine
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -137,7 +138,11 @@ transactions_with_flags = transactions \
         compute_is_suspicious_udf(F.col("merchant_country"), F.col("amount"))
     )
 
-# ── 7. Redis batch writers with validation ────────────────────────────────────
+# ── 7. Redis batch writers with validation + quarantine ─────────────────────────
+# Invalid rows are quarantined to s3://features/quarantine/invalid_records/
+# (and /tmp/quarantine/ fallback) instead of being silently dropped.
+# Quarantine I/O is best-effort and never kills the streaming query.
+
 def write_windowed_batch_to_redis(batch_df, batch_id):
     if batch_df.rdd.isEmpty():
         return
@@ -153,10 +158,13 @@ def write_windowed_batch_to_redis(batch_df, batch_id):
     )
     for row in latest_per_user.collect():
         row_dict = row.asDict()
-        # Validate before writing to Redis
         is_valid, errors = validate_user_features(row_dict)
         if not is_valid:
-            logger.warning(f"Skipping invalid user features: {errors}")
+            logger.warning("Skipping invalid user features: %s | row=%s", errors, row_dict)
+            try:
+                write_to_quarantine(row_dict, errors, kind="user_features", batch_id=batch_id)
+            except Exception as exc:
+                logger.debug("Quarantine failed (non-fatal): %s", exc)
             continue
         write_user_features_to_redis(row_dict)
 
@@ -166,14 +174,31 @@ def write_flags_batch_to_redis(batch_df, batch_id):
         return
     for row in batch_df.collect():
         row_dict = row.asDict()
-        # Validate before writing to Redis
         is_valid, errors = validate_transaction_flags(row_dict)
         if not is_valid:
-            logger.warning(f"Skipping invalid transaction flags: {errors}")
+            logger.warning("Skipping invalid transaction flags: %s | row=%s", errors, row_dict)
+            try:
+                write_to_quarantine(row_dict, errors, kind="transaction_flags", batch_id=batch_id)
+            except Exception as exc:
+                logger.debug("Quarantine failed (non-fatal): %s", exc)
             continue
         write_transaction_flags_to_redis(row_dict)
 
-# ── 8. Query 1 — Windowed features → Redis (online store) ───────────────────
+# ── 8. Query 0 — Raw transactions → S3/MinIO (Bronze layer / replay log) ────
+# Medallion Bronze: land raw events unchanged before any transform. Enables
+# replay, audit, and schema evolution without re-consuming Kafka. This is the
+# ELT half of the hybrid ELT + ETL architecture (Silver/Gold are the ETL half).
+query0 = transactions \
+    .writeStream \
+    .outputMode("append") \
+    .format("json") \
+    .option("path", "s3a://features/bronze/raw_transactions/") \
+    .option("checkpointLocation", "/tmp/checkpoints/bronze_raw") \
+    .trigger(processingTime="30 seconds") \
+    .queryName("bronze_raw_s3") \
+    .start()
+
+# ── 9. Query 1 — Windowed features → Redis (online store) ───────────────────
 query1 = txn_count_5min \
     .writeStream \
     .outputMode("update") \
@@ -183,7 +208,7 @@ query1 = txn_count_5min \
     .queryName("windowed_features_redis") \
     .start()
 
-# ── 9. Query 2 — Transaction flags → Redis (online store) ─────────────────────
+# ── 10. Query 2 — Transaction flags → Redis (online store) ────────────────────
 query2 = transactions_with_flags \
     .select(
         "transaction_id", "user_id", "amount",
@@ -198,7 +223,9 @@ query2 = transactions_with_flags \
     .queryName("transaction_flags_redis") \
     .start()
 
-# ── 10. Query 3 — Windowed features → S3/MinIO (offline store) ───────────────
+# ── 11. Query 3 — Windowed features → S3/MinIO (Silver/offline store) ─────────
+# Silver: cleaned windowed aggregates in Parquet. Feast reads this for
+# historical training (s3://features/windowed_features/).
 query3 = txn_count_5min \
     .writeStream \
     .outputMode("append") \
@@ -210,8 +237,9 @@ query3 = txn_count_5min \
     .start()
 
 print("🚀 Streaming queries started. Waiting for data...\n")
-print("   query1 → windowed features → Redis      (every 30 seconds)")
-print("   query2 → transaction flags  → Redis      (every 10 seconds)")
-print("   query3 → windowed features → S3/MinIO     (every 30 seconds)")
+print("   query0 → raw transactions  → S3/MinIO Bronze  (every 30 seconds)")
+print("   query1 → windowed features → Redis            (every 30 seconds)")
+print("   query2 → transaction flags → Redis            (every 10 seconds)")
+print("   query3 → windowed features → S3/MinIO Silver  (every 30 seconds)")
 
 spark.streams.awaitAnyTermination()
