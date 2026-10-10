@@ -1,4 +1,10 @@
-.PHONY: up down logs produce spark train api health test lint clean help
+.PHONY: up down logs produce jars spark train train-historical feast-apply api health test lint clean help
+
+# Read API_KEYS (etc.) from .env if present, so `make health` sends the same key
+# the API was started with. Falls back to the docker-compose dev default.
+-include .env
+comma := ,
+API_KEY ?= $(firstword $(subst $(comma), ,$(or $(API_KEYS),dev-api-key-change-in-prod)))
 
 # ── Infrastructure ──────────────────────────────────────────────────────
 up:  ## Start all infra + build Spark & API images
@@ -46,13 +52,16 @@ install:  ## Install all Python deps into active venv
 produce:  ## Run transaction producer (2 tx/sec)
 	python producer/produce_transactions.py
 
-spark:  ## Run Spark streaming feature pipeline (4 queries: bronze→S3, windows→Redis, flags→Redis, silver→S3)
+jars:  ## Download Kafka + S3A connector JARs into spark/jars/ (gitignored; needed once per clone)
+	./scripts/download_jars.sh
+
+spark: jars  ## Run Spark streaming pipeline (5 queries: bronze→S3, windows→Redis, flags→Redis, silver→S3, labels→S3)
 	python spark/feature_engineering.py
 
 train:  ## Train XGBoost model (synthetic 10k rows)
 	python models/train.py
 
-train-historical:  ## Train on Feast offline store (requires Parquet in MinIO)
+train-historical:  ## Train on Feast point-in-time features (needs ~20 min of producer+spark data, then feast-apply)
 	python models/train.py --historical
 
 api:  ## Serve FastAPI scoring service on :8000
@@ -61,8 +70,8 @@ api:  ## Serve FastAPI scoring service on :8000
 mlflow:  ## Launch MLflow UI on :5000
 	mlflow ui --port 5000
 
-feast-apply:  ## Register Feast feature view (needs AWS env vars for MinIO)
-	cd feast && feast apply
+feast-apply:  ## Register Feast feature view (MinIO creds default to minioadmin)
+	cd feast && AWS_ACCESS_KEY_ID=$${AWS_ACCESS_KEY_ID:-minioadmin} AWS_SECRET_ACCESS_KEY=$${AWS_SECRET_ACCESS_KEY:-minioadmin} feast apply
 
 # ── Verification ────────────────────────────────────────────────────────
 health:  ## Hit API health + score endpoints
@@ -70,6 +79,7 @@ health:  ## Hit API health + score endpoints
 	@echo "---"
 	curl -s -X POST http://localhost:8000/score \
 	  -H "Content-Type: application/json" \
+	  -H "X-API-Key: $(API_KEY)" \
 	  -d '{"user_id":"user_0001","amount":1500,"merchant_category":"electronics","merchant_country":"NG"}' \
 	  | python -m json.tool
 

@@ -6,60 +6,58 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 End-to-end real-time fraud detection feature store pipeline:
 
-**Producer → Kafka → Spark Streaming → Redis (online) / MinIO (offline) → XGBoost (MLflow) → FastAPI scoring service** *(Feast declares the offline schema but is not on the live serving path; the API reads directly from Redis.)*
+**Producer → Kafka → Spark Streaming → Redis (online) / MinIO (offline) → XGBoost (MLflow) → FastAPI scoring service**
 
-A `producer` generates synthetic transactions onto Kafka topic `raw_transactions`. A Spark Structured Streaming job (`spark/feature_engineering.py`) consumes that topic, computes 5-minute tumbling windowed aggregates and per-transaction flags, and writes them to Redis (online store) and MinIO/S3 (offline store). A Feast feature view (`feast/features.py`) declares the schema over the offline Parquet (used for historical training only). An XGBoost model is trained on synthetic data (`models/train.py`) with MLflow tracking. A FastAPI service (`api/main.py`) loads the latest model from `mlruns/`, reads user features from Redis at request time, and returns a fraud probability.
+- `producer/` publishes synthetic transactions to Kafka topic `raw_transactions` and each transaction's fraud label to a **separate** topic `fraud_labels` (simulated chargeback feed). The transaction stream never carries the label.
+- `spark/feature_engineering.py` (Structured Streaming) computes 5-minute windows sliding every 1 minute, plus per-transaction flags, and runs 5 queries: Bronze raw JSON → MinIO, windowed features → Redis, transaction flags → Redis, windowed features → MinIO Silver Parquet, labels → MinIO Parquet.
+- `feast/features.py` declares a feature view over Silver Parquet. It is **not** on the live serving path. `models/train.py --historical` uses it via `get_historical_features()` for point-in-time-correct training data.
+- `models/train.py` trains XGBoost (synthetic data by default, or Feast historical features) with MLflow tracking.
+- `api/main.py` (FastAPI) loads the latest model from `mlruns/`, reads user features directly from Redis, and returns a fraud probability (+ optional SHAP explanations).
 
 ## Running the system
 
-Infrastructure (Kafka, Zookeeper, kafka-ui, Redis, MinIO) is dockerized. Spark runs locally against these services (note the dual Kafka listeners in `docker-compose.yml`: `kafka:29092` for inside the Docker network, `localhost:9092` for the host — Spark connects via `localhost:9092`).
+Infrastructure (Kafka, Zookeeper, kafka-ui, Redis, MinIO, Prometheus, Grafana) is dockerized. Spark, the producer, training and the API can run locally against it. The `Makefile` wraps everything (`make help`).
 
 ```bash
-# 1. Start infrastructure
-docker compose up -d
-# kafka-ui:    http://localhost:8080
-# minio console: http://localhost:9001  (minioadmin / minioadmin)
-# redis:       localhost:6379
+cp .env.example .env          # set API_KEYS — the API raises at import without it
+make up                       # docker compose up -d
+make jars                     # once per clone: Spark connector JARs → spark/jars/ (gitignored, ~290 MB)
+source venv/bin/activate && make install
+make produce                  # terminal A
+make spark                    # terminal B (runs `make jars` first)
+make train                    # synthetic training
+make api                      # terminal C, uvicorn :8000
+make health                   # smoke test (sends X-API-Key from .env)
+make test                     # pytest
 
-# 2. Produce transactions (terminal A) — install in venv first
-source venv/bin/activate
-pip install -r producer/requirements.txt
-python producer/produce_transactions.py
-
-# 3. Run Spark feature pipeline (terminal B)
-pip install -r spark/requirements.txt
-python spark/feature_engineering.py
-
-# 4. Train model (run once, or after schema changes)
-python models/train.py   # requires xgboost, scikit-learn, mlflow in venv
-
-# 5. Serve predictions (terminal C)
-uvicorn api.main:app --reload --port 8000
-#   POST /score     body: {user_id, amount, merchant_category, merchant_country}
-#   GET  /user/{id} returns raw Redis features
-#   GET  /health    model + redis status
-
-# 6. Inspect runs
-mlflow ui --port 5000   # experiment: fraud_detection
+# Historical training (real point-in-time features):
+# let producer + spark run 20+ min (Silver windows land ~15 min late: 5m window + 10m watermark)
+make feast-apply && make train-historical
 ```
 
-`feast apply` (run from the `feast/` directory) is **not required for the live API** — `/score` reads windowed aggregates directly from Redis at key `user_features:{user_id}`. Feast is only needed if you want to build historical training sets via `get_historical_features()` against the Parquet offline store. If you do run it, the registry is at `feast/registry.db`.
+Endpoints: `POST /score` (`?explain=true` for SHAP), `POST /explain`, `GET /user/{id}`, `GET /health`, `GET /metrics`. All except `/health` and `/metrics` require the `X-API-Key` header.
 
 ## Critical files
 
-- `spark/feature_engineering.py` — Streaming entry point. Three `writeStream` queries: windowed features → Redis (30s), transaction flags → Redis (10s), windowed features → MinIO (30s, S3A). Kafka connector jars must be present in `spark/jars/`. Watermark is 10 minutes; window is 5min slide 1min.
-- `spark/redis_writer.py` — `write_user_features_to_redis` (key `user_features:{user_id}`, 24h TTL) and `write_transaction_flags_to_redis` (key `txn_flags:{txn_id}`, 1h TTL).
-- `producer/produce_transactions.py` — ~3% fraud rate, 200 users, 2 tx/sec. Emits to topic `raw_transactions` on `localhost:9092`.
-- `feast/features.py` + `feast/feature_store.yaml` — single `user_transaction_features` view with 24h TTL, entity `user_id`, online store = Redis, offline `FileSource` reads from `s3://features/windowed_features/` (MinIO). The registry is the file at `feast/registry.db` (resolved relative to the Feast repo, not the cwd).
-- `models/train.py` — Synthetic 10k-row dataset. Feature order must match `FEATURE_ORDER` in `api/main.py`. Logs to MLflow experiment `fraud_detection`, tracking URI `file:./mlruns`. Saves feature importance plot to `models/artifacts/`.
-- `api/main.py` — On startup scans `mlruns/*/*/meta.yaml` for `status == 3` runs and loads the most recent `artifacts/model/` via `mlflow.xgboost.load_model`. Reads windowed user features directly from Redis at key `user_features:{user_id}` (the keys written by `spark/redis_writer.py`). Falls back gracefully if model or Redis is unavailable. Risk thresholds: `>0.7` HIGH, `>0.4` MEDIUM, else LOW.
+- `features/__init__.py` — **the feature contract.** `FEATURE_ORDER`, thresholds, and `build_feature_vector(user_features, amount, merchant_country)`. Both training and serving must build model input through this function.
+- `spark/feature_engineering.py` — streaming entry point. Session timezone is UTC, and Parquet timestamps are `TIMESTAMP_MICROS` (Feast needs tz-aware timestamps). Watermark 10 min. Needs the JARs in `spark/jars/`.
+- `spark/windowing.py` — `select_trailing_window()`: which of a user's 5 overlapping windows goes to Redis (the oldest one containing their latest activity = trailing 5 min). Picking the latest `window_start` is a known bug: it only covers ~1 minute.
+- `spark/redis_writer.py` — `user_features:{user_id}` (TTL **5 min**, so stale windows expire) and `txn_flags:{txn_id}` (TTL 1h).
+- `spark/validation.py`, `spark/quarantine.py` — invalid rows go to `s3://features/quarantine/invalid_records/` (fallback `/tmp/quarantine/`). Quarantine never kills a query.
+- `feast/features.py` + `feast/feature_store.yaml` — `timestamp_field="window_end"` (window_start would leak future transactions), TTL 2 min, `FileSource` at `s3://features/windowed_features/` with `s3_endpoint_override` for MinIO. Registry: `feast/registry.db`.
+- `models/train.py` — `generate_synthetic_data()`, `load_labeled_transactions()` (Bronze ⨝ labels → entity df), `build_historical_training_set()` (Feast PIT join), `build_feature_matrix()`. `--historical` raises `HistoricalDataError` instead of falling back to synthetic data.
+- `api/main.py` — model discovery scans `mlruns/*/*/meta.yaml` for `status == 3`. `_fetch_user_features()` reads Redis and never raises. Risk: `>0.7` HIGH, `>0.4` MEDIUM.
+- `api/auth.py` — requires `API_KEYS` env var at import (comma-separated). `api/rate_limit.py`, `api/metrics.py`, `api/explain.py` (SHAP or importance fallback).
+- `scripts/download_jars.sh` — JAR versions must stay in sync with `spark/Dockerfile` (Spark 3.5.1, Scala 2.12, kafka-clients 3.4.1).
 
 ## Conventions and gotchas
 
-- **Feature order is the contract.** `FEATURE_ORDER` in `api/main.py` must match the column order used to train in `models/train.py` and the schema in `feast/features.py`. Changing the feature set requires retraining.
-- **Kafka dual listeners.** The producer and Spark both connect on `localhost:9092` (external). Containers talk to each other on `kafka:29092` (internal). Don't change `KAFKA_ADVERTISED_LISTENERS` without updating both clients.
-- **MinIO/S3 alignment.** Spark writes to `s3a://features/windowed_features/`, Feast reads from `s3://features/windowed_features/` (same bucket, different protocol). The `features` bucket is auto-created on `docker compose up` by the one-shot `minio-init` sidecar (`mc mb --ignore-existing`), so no manual `mc` step is required. The MinIO endpoint/credentials are wired in two places: `spark/feature_engineering.py:30-33` (S3A session config) and `feast/features.py` (`s3_endpoint_override` on the `FileSource`).
-- **No `.gitignore` yet.** `mlruns/`, `dump.rdb` (Redis dump), and the `venv/` directory are tracked. Add a `.gitignore` before initial commit.
-- **No `requirements.txt` at the repo root.** Dependencies are scattered: `producer/requirements.txt`, `spark/requirements.txt`, and inline imports for `api/` (FastAPI, uvicorn, mlflow, xgboost, scikit-learn, pandas, numpy, matplotlib, pyyaml, redis) and `models/` (mlflow, xgboost, scikit-learn, pandas, numpy, matplotlib). Feast is also needed.
-- **No automated tests.** Validation is done by running each phase and inspecting Redis (`redis-cli HGETALL user_features:user_0001`), MinIO, MLflow UI, and the `/score` endpoint.
-- **The `is_fraud` label is in the producer's Kafka payload** (`producer/produce_transactions.py:54`) as a comment acknowledges — in production this would not be present in the stream and would only exist as a delayed label.
+- **Never re-derive features inline.** Transaction flags (`is_foreign`, `is_high_amount`, `is_suspicious`) come from the scored transaction's own amount and country, never from aggregates like `max_amount_5min`. Missing windowed values (no Redis key / NaN from the offline join) become 0.0 in both paths. Parity tests: `tests/test_training.py::TestTrainingServingParity`, `tests/test_api.py::TestScoreUsesTrainingFeaturePath`. Changing the feature set requires retraining.
+- **Feast file offline store quirks (0.40, still present in 0.66).** It crashes when an entity's user has no Silver rows, and silently drops entity rows whose windows are all outside the TTL. `build_historical_training_set()` works around both. Keep that workaround and `tests/test_historical_feast.py`.
+- **Online vs offline window is an approximation.** Redis holds `[T-4m, T+1m)` around the latest event, while Feast uses the latest closed window `[t-5m, t)`.
+- **Kafka dual listeners.** Host clients use `localhost:9092`, containers use `kafka:29092`. Don't change `KAFKA_ADVERTISED_LISTENERS` without updating both.
+- **MinIO.** The `features` bucket is created by the `minio-init` sidecar. Endpoint/creds are wired in the Spark session config (`MINIO_*` env vars), on the Feast `FileSource` (`s3_endpoint_override`), and as `AWS_*` env vars for PyArrow (defaulted by `make feast-apply` and `train.py`).
+- **CI runs Python 3.9** (`.github/workflows/ci.yml`). Don't use 3.10+ syntax such as `X | None` in annotations without `from __future__ import annotations`. CI installs deps explicitly (not from `requirements.txt`), so add new runtime imports there too. Jobs: Lint, Test, Security (Bandit, pip-audit, Trivy pinned by SHA).
+- **Tests.** `pytest` (≈145 tests). `tests/test_windowing.py` and `tests/test_historical_feast.py` start a local Spark session and skip if Java/PySpark/Feast are missing. In sandboxes without hostname resolution, set `SPARK_LOCAL_IP=127.0.0.1 SPARK_LOCAL_HOSTNAME=localhost`.
+- **Labels.** `is_fraud` exists only on the `fraud_labels` topic / `s3://features/labels/`. In production it would be a delayed chargeback feed.
+- **Not committed:** `mlruns/`, `dump.rdb`, `venv/`, `.env`, `spark/jars/`, `feast/registry.db` (see `.gitignore`; CI fails if any are tracked).
